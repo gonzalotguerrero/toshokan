@@ -1,0 +1,13 @@
+package io.github.gonzalotguerrero.toshokan;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+
+@SpringBootTest
+class ToshokanApplicationTests {
+
+    @Test
+    void contextLoads() {
+    }
+
+}
