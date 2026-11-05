@@ -1,4 +1,4 @@
-package io.github.gonzalotguerrero.toshokan.inventory.listing;
+package io.github.gonzalotguerrero.toshokan.inventory.holdings;
 
 import io.github.gonzalotguerrero.toshokan.catalog.book.BookDetails;
 import io.github.gonzalotguerrero.toshokan.inventory.bookcopy.BookCopy;
@@ -24,19 +24,19 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-class BookListingRefresherTest {
+class BookHoldingsRefresherTest {
 
     private static final BookDetails DUNE = new BookDetails(UUID.randomUUID(), "9780441013593", "Dune",
             List.of("Frank Herbert"), "Ace", 1965, "English", Set.of("Science fiction"), Instant.now());
 
     @Mock
-    private BookListingRepository listing;
+    private BookHoldingsRepository holdings;
 
     @Mock
     private BookCopyRepository copies;
 
     @InjectMocks
-    private BookListingRefresher refresher;
+    private BookHoldingsRefresher refresher;
 
     @Test
     void countsAllCopiesAndTheAvailableOnes() {
@@ -46,36 +46,36 @@ class BookListingRefresherTest {
 
         refresher.refresh(DUNE);
 
-        ArgumentCaptor<BookListingEntry> saved = ArgumentCaptor.forClass(BookListingEntry.class);
-        verify(listing).save(saved.capture());
+        ArgumentCaptor<BookHoldings> saved = ArgumentCaptor.forClass(BookHoldings.class);
+        verify(holdings).save(saved.capture());
         assertThat(saved.getValue().totalCopies()).isEqualTo(3);
         assertThat(saved.getValue().availableCopies()).isEqualTo(2);
     }
 
     @Test
-    void copiesTheBookDetailsIntoTheListing() {
+    void copiesTheBookDetailsIntoTheHoldings() {
         when(copies.findByBookId(DUNE.bookId())).thenReturn(List.of(copy(BookCopyStatus.AVAILABLE)));
 
         refresher.refresh(DUNE);
 
-        ArgumentCaptor<BookListingEntry> saved = ArgumentCaptor.forClass(BookListingEntry.class);
-        verify(listing).save(saved.capture());
-        assertThat(saved.getValue()).isEqualTo(BookListingEntry.of(DUNE.bookId(), "9780441013593", "Dune",
+        ArgumentCaptor<BookHoldings> saved = ArgumentCaptor.forClass(BookHoldings.class);
+        verify(holdings).save(saved.capture());
+        assertThat(saved.getValue()).isEqualTo(BookHoldings.of(DUNE.bookId(), "9780441013593", "Dune",
                 List.of("Frank Herbert"), "Ace", 1965, "English", Set.of("Science fiction"), 1, 1));
     }
 
     @Test
-    void removesTheBookFromTheListingWhenItHasNoCopiesLeft() {
+    void removesTheBookFromTheHoldingsWhenItHasNoCopiesLeft() {
         when(copies.findByBookId(DUNE.bookId())).thenReturn(List.of());
 
         refresher.refresh(DUNE);
 
         ArgumentCaptor<MapId> deleted = ArgumentCaptor.forClass(MapId.class);
-        verify(listing).deleteById(deleted.capture());
-        assertThat(deleted.getValue()).containsEntry("listingPartition", BookListingEntry.LISTING_PARTITION)
+        verify(holdings).deleteById(deleted.capture());
+        assertThat(deleted.getValue()).containsEntry("holdingsPartition", BookHoldings.HOLDINGS_PARTITION)
                 .containsEntry("sortTitle", "dune")
                 .containsEntry("bookId", DUNE.bookId());
-        verify(listing, never()).save(any());
+        verify(holdings, never()).save(any());
     }
 
     private static BookCopy copy(BookCopyStatus status) {

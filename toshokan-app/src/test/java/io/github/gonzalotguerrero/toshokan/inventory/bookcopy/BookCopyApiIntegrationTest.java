@@ -3,8 +3,8 @@ package io.github.gonzalotguerrero.toshokan.inventory.bookcopy;
 import io.github.gonzalotguerrero.toshokan.TestcontainersConfiguration;
 import io.github.gonzalotguerrero.toshokan.catalog.book.Book;
 import io.github.gonzalotguerrero.toshokan.catalog.book.BookDetails;
-import io.github.gonzalotguerrero.toshokan.inventory.listing.BookListingEntry;
-import io.github.gonzalotguerrero.toshokan.inventory.listing.BookSummary;
+import io.github.gonzalotguerrero.toshokan.inventory.holdings.BookHoldings;
+import io.github.gonzalotguerrero.toshokan.inventory.holdings.BookSummary;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -23,7 +23,7 @@ import static org.assertj.core.api.Assertions.tuple;
 
 /**
  * Creates a book, adds copies to it and checks that {@code GET /books} shows it with the right counts. It's
- * the path the listing depends on, end to end.
+ * the path the holdings depend on, end to end.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
@@ -42,7 +42,7 @@ class BookCopyApiIntegrationTest {
         cassandra.truncate(Book.class);
         cassandra.truncate(BookCopy.class);
         cassandra.truncate(BookCopyByInventoryNumber.class);
-        cassandra.truncate(BookListingEntry.class);
+        cassandra.truncate(BookHoldings.class);
         client = RestTestClient.bindToServer().baseUrl("http://localhost:" + port + "/toshokan").build();
     }
 
@@ -54,7 +54,7 @@ class BookCopyApiIntegrationTest {
     }
 
     @Test
-    void addingTheFirstCopyPutsTheBookInTheListing() {
+    void addingTheFirstCopyPutsTheBookInTheHoldings() {
         BookDetails dune = createBook("Dune");
 
         BookCopyDetails copy = addBookCopy(dune.bookId(), "LIB-000001");

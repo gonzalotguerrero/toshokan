@@ -1,4 +1,4 @@
-package io.github.gonzalotguerrero.toshokan.inventory.listing;
+package io.github.gonzalotguerrero.toshokan.inventory.holdings;
 
 import org.springframework.data.cassandra.core.cql.Ordering;
 import org.springframework.data.cassandra.core.cql.PrimaryKeyType;
@@ -12,20 +12,21 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * A title the library has at least one copy of, lent or not.
+ * What the library holds of one title: its details plus how many copies there are, lent or not. Only titles
+ * with at least one copy have a row.
  *
- * <p>Every row has the same {@code listing_partition} ({@link #LISTING_PARTITION}), so the whole listing
- * sits in one Cassandra partition, sorted by title regardless of case. One library's catalog fits in a
+ * <p>Every row has the same {@code holdings_partition} ({@link #HOLDINGS_PARTITION}), so all the holdings
+ * sit in one Cassandra partition, sorted by title regardless of case. One library's catalog fits in a
  * partition easily. If it ever doesn't, this is the column to split on.
  *
  * <p>Book details are copied over from the catalog. That's safe because a book can't be edited once it's
  * created. The copy counts get recalculated whenever one of the book's copies changes.
  */
-@Table("book_listing")
-public record BookListingEntry(
+@Table("book_holdings")
+public record BookHoldings(
 
-        @PrimaryKeyColumn(name = "listing_partition", ordinal = 0, type = PrimaryKeyType.PARTITIONED)
-        int listingPartition,
+        @PrimaryKeyColumn(name = "holdings_partition", ordinal = 0, type = PrimaryKeyType.PARTITIONED)
+        int holdingsPartition,
 
         @PrimaryKeyColumn(name = "sort_title", ordinal = 1, type = PrimaryKeyType.CLUSTERED, ordering = Ordering.ASCENDING)
         String sortTitle,
@@ -44,16 +45,16 @@ public record BookListingEntry(
         @Column("available_copies") int availableCopies
 ) {
 
-    public static final int LISTING_PARTITION = 0;
+    public static final int HOLDINGS_PARTITION = 0;
 
     public static String sortKeyFor(String title) {
         return title.strip().toLowerCase(Locale.ROOT);
     }
 
-    public static BookListingEntry of(UUID bookId, String isbn, String title, List<String> authors, String publisher,
+    public static BookHoldings of(UUID bookId, String isbn, String title, List<String> authors, String publisher,
                                       Integer publicationYear, String language, Set<String> genres,
                                       int totalCopies, int availableCopies) {
-        return new BookListingEntry(LISTING_PARTITION, sortKeyFor(title), bookId, isbn, title, authors, publisher,
+        return new BookHoldings(HOLDINGS_PARTITION, sortKeyFor(title), bookId, isbn, title, authors, publisher,
                 publicationYear, language, genres, totalCopies, availableCopies);
     }
 }

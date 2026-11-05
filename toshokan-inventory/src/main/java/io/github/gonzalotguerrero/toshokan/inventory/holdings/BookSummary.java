@@ -1,4 +1,4 @@
-package io.github.gonzalotguerrero.toshokan.inventory.listing;
+package io.github.gonzalotguerrero.toshokan.inventory.holdings;
 
 import java.util.List;
 import java.util.Set;
@@ -17,7 +17,7 @@ public record BookSummary(
         int availableCopies
 ) {
 
-    static BookSummary from(BookListingEntry entry) {
+    static BookSummary from(BookHoldings entry) {
         return new BookSummary(entry.bookId(), entry.isbn(), entry.title(),
                 entry.authors() == null ? List.of() : entry.authors(),
                 entry.publisher(), entry.publicationYear(), entry.language(),

@@ -1,4 +1,4 @@
-package io.github.gonzalotguerrero.toshokan.inventory.listing;
+package io.github.gonzalotguerrero.toshokan.inventory.holdings;
 
 import io.github.gonzalotguerrero.toshokan.TestcontainersConfiguration;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,13 +23,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
-class BookListingApiIntegrationTest {
+class BookHoldingsApiIntegrationTest {
 
     @LocalServerPort
     private int port;
 
     @Autowired
-    private BookListingRepository repository;
+    private BookHoldingsRepository repository;
 
     private RestTestClient client;
 
@@ -63,7 +63,7 @@ class BookListingApiIntegrationTest {
 
     @Test
     void returnsBookDetailsAndCopyCounts() {
-        BookListingEntry dune = save("Dune", 3, 1);
+        BookHoldings dune = save("Dune", 3, 1);
 
         BookSummary book = getBooks("/api/v1/books").items().getFirst();
 
@@ -120,8 +120,8 @@ class BookListingApiIntegrationTest {
                 .expectStatus().isNotFound();
     }
 
-    private BookListingEntry save(String title, int totalCopies, int availableCopies) {
-        return repository.save(BookListingEntry.of(UUID.randomUUID(), "isbn-" + title, title, List.of("Some Author"),
+    private BookHoldings save(String title, int totalCopies, int availableCopies) {
+        return repository.save(BookHoldings.of(UUID.randomUUID(), "isbn-" + title, title, List.of("Some Author"),
                 "Some Publisher", 2001, "en", Set.of("fiction"), totalCopies, availableCopies));
     }
 

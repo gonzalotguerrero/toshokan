@@ -11,7 +11,7 @@ import java.util.UUID;
 
 /**
  * A title in the catalog. Books can't be edited after they're created. That's why other tables, like the
- * inventory's book listing, can safely keep their own copy of these details.
+ * inventory's book holdings, can safely keep their own copy of these details.
  */
 @Table("books")
 public record Book(

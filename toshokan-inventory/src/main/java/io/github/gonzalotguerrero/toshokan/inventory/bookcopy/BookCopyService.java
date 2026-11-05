@@ -2,7 +2,7 @@ package io.github.gonzalotguerrero.toshokan.inventory.bookcopy;
 
 import io.github.gonzalotguerrero.toshokan.catalog.book.BookDetails;
 import io.github.gonzalotguerrero.toshokan.catalog.book.BookService;
-import io.github.gonzalotguerrero.toshokan.inventory.listing.BookListingRefresher;
+import io.github.gonzalotguerrero.toshokan.inventory.holdings.BookHoldingsRefresher;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.ConflictException;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.NotFoundException;
 import org.slf4j.Logger;
@@ -21,19 +21,19 @@ public class BookCopyService {
     private final BookService books;
     private final BookCopyRepository copies;
     private final InventoryNumberClaims inventoryNumbers;
-    private final BookListingRefresher listingRefresher;
+    private final BookHoldingsRefresher holdingsRefresher;
 
     public BookCopyService(BookService books, BookCopyRepository copies, InventoryNumberClaims inventoryNumbers,
-                       BookListingRefresher listingRefresher) {
+                           BookHoldingsRefresher holdingsRefresher) {
         this.books = books;
         this.copies = copies;
         this.inventoryNumbers = inventoryNumbers;
-        this.listingRefresher = listingRefresher;
+        this.holdingsRefresher = holdingsRefresher;
     }
 
     /**
      * Adds a new copy of a book, on the shelf and ready to be lent. If it's the book's first copy, the book
-     * appears in the listing; otherwise its counts go up.
+     * appears in the holdings; otherwise its counts go up.
      */
     public BookCopyDetails addBookCopy(UUID bookId, AddBookCopyRequest request) {
         BookDetails book = books.findBook(bookId)
@@ -54,11 +54,11 @@ public class BookCopyService {
         log.info("Added copy {} ({}) of book {}", copy.bookCopyId(), inventoryNumber, bookId);
 
         try {
-            listingRefresher.refresh(book);
+            holdingsRefresher.refresh(book);
         } catch (RuntimeException e) {
             // The copy is already saved, so we don't fail the request. A retry would only get "number already
-            // in use". The listing gets fixed the next time any copy of this book changes.
-            log.warn("Book copy {} was added but the listing for book {} couldn't be updated",
+            // in use". The holdings get fixed the next time any copy of this book changes.
+            log.warn("Book copy {} was added but the holdings for book {} couldn't be updated",
                     copy.bookCopyId(), bookId, e);
         }
         return BookCopyDetails.from(copy);

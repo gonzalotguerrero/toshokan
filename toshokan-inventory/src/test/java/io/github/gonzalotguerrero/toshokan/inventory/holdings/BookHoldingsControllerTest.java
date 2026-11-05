@@ -1,4 +1,4 @@
-package io.github.gonzalotguerrero.toshokan.inventory.listing;
+package io.github.gonzalotguerrero.toshokan.inventory.holdings;
 
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.InvalidRequestException;
 import io.github.gonzalotguerrero.toshokan.shared.paging.PageResponse;
@@ -26,28 +26,28 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @ExtendWith(MockitoExtension.class)
-class BookListingControllerTest {
+class BookHoldingsControllerTest {
 
     @Mock
-    private BookListingService service;
+    private BookHoldingsService service;
 
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
-        mockMvc = MockMvcBuilders.standaloneSetup(new BookListingController(service))
+        mockMvc = MockMvcBuilders.standaloneSetup(new BookHoldingsController(service))
                 .setControllerAdvice(new ApiExceptionHandlerAdvice())
                 .build();
     }
 
     @Test
     void usesDefaultsWhenNoParametersAreGiven() throws Exception {
-        when(service.listBooks(false, BookListingService.DEFAULT_PAGE_SIZE, null))
+        when(service.listBooks(false, BookHoldingsService.DEFAULT_PAGE_SIZE, null))
                 .thenReturn(new PageResponse<>(List.of(), null));
 
         mockMvc.perform(get("/api/v1/books")).andExpect(status().isOk());
 
-        verify(service).listBooks(false, BookListingService.DEFAULT_PAGE_SIZE, null);
+        verify(service).listBooks(false, BookHoldingsService.DEFAULT_PAGE_SIZE, null);
     }
 
     @Test

@@ -1,4 +1,4 @@
-package io.github.gonzalotguerrero.toshokan.inventory.listing;
+package io.github.gonzalotguerrero.toshokan.inventory.holdings;
 
 import io.github.gonzalotguerrero.toshokan.shared.paging.PageResponse;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -8,18 +8,18 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/v1/books")
-public class BookListingController {
+public class BookHoldingsController {
 
-    private final BookListingService service;
+    private final BookHoldingsService service;
 
-    public BookListingController(BookListingService service) {
+    public BookHoldingsController(BookHoldingsService service) {
         this.service = service;
     }
 
     @GetMapping
     public PageResponse<BookSummary> listBooks(
             @RequestParam(name = "available", defaultValue = "false") boolean available,
-            @RequestParam(name = "pageSize", defaultValue = "" + BookListingService.DEFAULT_PAGE_SIZE) int pageSize,
+            @RequestParam(name = "pageSize", defaultValue = "" + BookHoldingsService.DEFAULT_PAGE_SIZE) int pageSize,
             @RequestParam(name = "pageToken", required = false) String pageToken) {
         return service.listBooks(available, pageSize, pageToken);
     }

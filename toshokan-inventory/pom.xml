@@ -9,8 +9,8 @@
     </parent>
     <artifactId>toshokan-inventory</artifactId>
     <name>toshokan-inventory</name>
-    <description>Physical copies, their status, and the book listing</description>
-    <!-- Depends on catalog to check that a book exists and to copy its details into the listing -->
+    <description>Physical copies, their status, and the book holdings</description>
+    <!-- Depends on catalog to check that a book exists and to copy its details into the holdings -->
 
     <dependencies>
         <dependency>

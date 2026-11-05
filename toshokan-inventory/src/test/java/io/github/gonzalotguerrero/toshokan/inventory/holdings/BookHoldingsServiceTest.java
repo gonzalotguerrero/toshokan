@@ -1,4 +1,4 @@
-package io.github.gonzalotguerrero.toshokan.inventory.listing;
+package io.github.gonzalotguerrero.toshokan.inventory.holdings;
 
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.InvalidRequestException;
 import io.github.gonzalotguerrero.toshokan.shared.paging.PageResponse;
@@ -22,7 +22,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
-import static io.github.gonzalotguerrero.toshokan.inventory.listing.BookListingEntry.LISTING_PARTITION;
+import static io.github.gonzalotguerrero.toshokan.inventory.holdings.BookHoldings.HOLDINGS_PARTITION;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -33,20 +33,20 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-class BookListingServiceTest {
+class BookHoldingsServiceTest {
 
-    private static final BookListingEntry DUNE = BookListingEntry.of(UUID.randomUUID(), "9780441013593", "Dune",
+    private static final BookHoldings DUNE = BookHoldings.of(UUID.randomUUID(), "9780441013593", "Dune",
             List.of("Frank Herbert"), "Ace", 1965, "en", Set.of("science fiction"), 3, 1);
 
     @Mock
-    private BookListingRepository repository;
+    private BookHoldingsRepository repository;
 
     @InjectMocks
-    private BookListingService service;
+    private BookHoldingsService service;
 
     @Test
     void listsAllTitlesWhenNotFilteringByAvailability() {
-        when(repository.findByListingPartition(eq(LISTING_PARTITION), any())).thenReturn(lastSlice(List.of(DUNE)));
+        when(repository.findByHoldingsPartition(eq(HOLDINGS_PARTITION), any())).thenReturn(lastSlice(List.of(DUNE)));
 
         PageResponse<BookSummary> page = service.listBooks(false, 20, null);
 
@@ -62,17 +62,17 @@ class BookListingServiceTest {
 
     @Test
     void listsOnlyTitlesWithACopyOnTheShelfWhenFilteringByAvailability() {
-        when(repository.findByListingPartitionAndAvailableCopiesGreaterThan(eq(LISTING_PARTITION), eq(0), any()))
+        when(repository.findByHoldingsPartitionAndAvailableCopiesGreaterThan(eq(HOLDINGS_PARTITION), eq(0), any()))
                 .thenReturn(lastSlice(List.of(DUNE)));
 
         service.listBooks(true, 20, null);
 
-        verify(repository).findByListingPartitionAndAvailableCopiesGreaterThan(eq(LISTING_PARTITION), eq(0), any());
+        verify(repository).findByHoldingsPartitionAndAvailableCopiesGreaterThan(eq(HOLDINGS_PARTITION), eq(0), any());
     }
 
     @Test
     void requestsTheGivenPageSizeStartingFromTheFirstPage() {
-        when(repository.findByListingPartition(eq(LISTING_PARTITION), any())).thenReturn(lastSlice(List.of()));
+        when(repository.findByHoldingsPartition(eq(HOLDINGS_PARTITION), any())).thenReturn(lastSlice(List.of()));
 
         service.listBooks(false, 5, null);
 
@@ -84,7 +84,7 @@ class BookListingServiceTest {
     @Test
     void resumesFromThePagingStateInThePageToken() {
         ByteBuffer state = ByteBuffer.wrap(new byte[]{7, 8, 9});
-        when(repository.findByListingPartition(eq(LISTING_PARTITION), any())).thenReturn(lastSlice(List.of()));
+        when(repository.findByHoldingsPartition(eq(HOLDINGS_PARTITION), any())).thenReturn(lastSlice(List.of()));
 
         service.listBooks(false, 20, PageTokens.encode(state));
 
@@ -94,9 +94,9 @@ class BookListingServiceTest {
     @Test
     void returnsATokenForTheNextPageWhenThereIsOne() {
         ByteBuffer nextState = ByteBuffer.wrap(new byte[]{4, 2});
-        SliceImpl<BookListingEntry> slice = new SliceImpl<>(List.of(DUNE),
+        SliceImpl<BookHoldings> slice = new SliceImpl<>(List.of(DUNE),
                 CassandraPageRequest.of(PageRequest.of(0, 1), nextState), true);
-        when(repository.findByListingPartition(eq(LISTING_PARTITION), any())).thenReturn(slice);
+        when(repository.findByHoldingsPartition(eq(HOLDINGS_PARTITION), any())).thenReturn(slice);
 
         PageResponse<BookSummary> page = service.listBooks(false, 1, null);
 
@@ -104,17 +104,17 @@ class BookListingServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {0, -1, BookListingService.MAX_PAGE_SIZE + 1})
+    @ValueSource(ints = {0, -1, BookHoldingsService.MAX_PAGE_SIZE + 1})
     void rejectsOutOfRangePageSizes(int pageSize) {
         assertThatThrownBy(() -> service.listBooks(false, pageSize, null))
                 .isInstanceOf(InvalidRequestException.class)
-                .hasMessage("pageSize must be between 1 and " + BookListingService.MAX_PAGE_SIZE);
+                .hasMessage("pageSize must be between 1 and " + BookHoldingsService.MAX_PAGE_SIZE);
         verifyNoInteractions(repository);
     }
 
     @Test
     void rejectsATokenThatCassandraDoesNotAccept() {
-        when(repository.findByListingPartition(anyInt(), any())).thenThrow(new InvalidDataAccessApiUsageException("bad state"));
+        when(repository.findByHoldingsPartition(anyInt(), any())).thenThrow(new InvalidDataAccessApiUsageException("bad state"));
 
         assertThatThrownBy(() -> service.listBooks(false, 20, PageTokens.encode(ByteBuffer.wrap(new byte[]{1}))))
                 .isInstanceOf(InvalidRequestException.class)
@@ -123,7 +123,7 @@ class BookListingServiceTest {
 
     @Test
     void propagatesDatabaseErrorsThatAreNotCausedByTheToken() {
-        when(repository.findByListingPartition(anyInt(), any())).thenThrow(new InvalidDataAccessApiUsageException("boom"));
+        when(repository.findByHoldingsPartition(anyInt(), any())).thenThrow(new InvalidDataAccessApiUsageException("boom"));
 
         assertThatThrownBy(() -> service.listBooks(false, 20, null))
                 .isInstanceOf(InvalidDataAccessApiUsageException.class);
@@ -131,11 +131,11 @@ class BookListingServiceTest {
 
     private CassandraPageRequest capturePageRequest() {
         ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
-        verify(repository).findByListingPartition(eq(LISTING_PARTITION), captor.capture());
+        verify(repository).findByHoldingsPartition(eq(HOLDINGS_PARTITION), captor.capture());
         return (CassandraPageRequest) captor.getValue();
     }
 
-    private static SliceImpl<BookListingEntry> lastSlice(List<BookListingEntry> content) {
+    private static SliceImpl<BookHoldings> lastSlice(List<BookHoldings> content) {
         return new SliceImpl<>(content, CassandraPageRequest.first(20), false);
     }
 }

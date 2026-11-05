@@ -1,4 +1,4 @@
-package io.github.gonzalotguerrero.toshokan.inventory.listing;
+package io.github.gonzalotguerrero.toshokan.inventory.holdings;
 
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.InvalidRequestException;
 import io.github.gonzalotguerrero.toshokan.shared.paging.PageResponse;
@@ -14,16 +14,16 @@ import org.springframework.stereotype.Service;
 import java.nio.ByteBuffer;
 
 @Service
-public class BookListingService {
+public class BookHoldingsService {
 
     public static final int DEFAULT_PAGE_SIZE = 20;
     public static final int MAX_PAGE_SIZE = 100;
 
-    private static final Logger log = LoggerFactory.getLogger(BookListingService.class);
+    private static final Logger log = LoggerFactory.getLogger(BookHoldingsService.class);
 
-    private final BookListingRepository repository;
+    private final BookHoldingsRepository repository;
 
-    public BookListingService(BookListingRepository repository) {
+    public BookHoldingsService(BookHoldingsRepository repository) {
         this.repository = repository;
     }
 
@@ -43,12 +43,12 @@ public class BookListingService {
         ByteBuffer pagingState = PageTokens.decode(pageToken);
         CassandraPageRequest pageRequest = CassandraPageRequest.of(PageRequest.of(0, pageSize), pagingState);
 
-        Slice<BookListingEntry> slice;
+        Slice<BookHoldings> slice;
         try {
             slice = onlyAvailable
-                    ? repository.findByListingPartitionAndAvailableCopiesGreaterThan(
-                            BookListingEntry.LISTING_PARTITION, 0, pageRequest)
-                    : repository.findByListingPartition(BookListingEntry.LISTING_PARTITION, pageRequest);
+                    ? repository.findByHoldingsPartitionAndAvailableCopiesGreaterThan(
+                            BookHoldings.HOLDINGS_PARTITION, 0, pageRequest)
+                    : repository.findByHoldingsPartition(BookHoldings.HOLDINGS_PARTITION, pageRequest);
         } catch (DataAccessException e) {
             if (pagingState != null) {
                 // A tampered token, or one from a different query, makes Cassandra fail
