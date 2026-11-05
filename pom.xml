@@ -35,6 +35,7 @@
 
     <modules>
         <module>toshokan-shared</module>
+        <module>toshokan-catalog</module>
         <module>toshokan-inventory</module>
         <module>toshokan-app</module>
     </modules>
@@ -50,6 +51,11 @@
             <dependency>
                 <groupId>io.github.gonzalotguerrero</groupId>
                 <artifactId>toshokan-shared</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.gonzalotguerrero</groupId>
+                <artifactId>toshokan-catalog</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

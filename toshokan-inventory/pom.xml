@@ -10,11 +10,16 @@
     <artifactId>toshokan-inventory</artifactId>
     <name>toshokan-inventory</name>
     <description>Physical copies, their status, and the book listing</description>
+    <!-- Depends on catalog to check that a book exists and to copy its details into the listing -->
 
     <dependencies>
         <dependency>
             <groupId>io.github.gonzalotguerrero</groupId>
             <artifactId>toshokan-shared</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.gonzalotguerrero</groupId>
+            <artifactId>toshokan-catalog</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -23,6 +28,10 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
     </dependencies>
 
