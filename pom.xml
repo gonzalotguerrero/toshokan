@@ -11,6 +11,7 @@
     <groupId>io.github.gonzalotguerrero</groupId>
     <artifactId>toshokan</artifactId>
     <version>0.0.1-SNAPSHOT</version>
+    <packaging>pom</packaging>
     <name>toshokan</name>
     <description>A web API aimed at providing inventory management services for libraries</description>
     <url>https://github.com/gonzalotguerrero/toshokan</url>
@@ -31,44 +32,41 @@
         <connection>scm:git:https://github.com/gonzalotguerrero/toshokan.git</connection>
         <developerConnection>scm:git:git@github.com:gonzalotguerrero/toshokan.git</developerConnection>
     </scm>
+
+    <modules>
+        <module>toshokan-shared</module>
+        <module>toshokan-inventory</module>
+        <module>toshokan-app</module>
+    </modules>
+
     <properties>
         <java.version>21</java.version>
+        <!-- Only toshokan-app can be run, so it sets this back to false -->
+        <spring-boot.run.skip>true</spring-boot.run.skip>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.github.gonzalotguerrero</groupId>
+                <artifactId>toshokan-shared</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.gonzalotguerrero</groupId>
+                <artifactId>toshokan-inventory</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!-- Every module gets JUnit, AssertJ, Mockito and Spring Test for its tests -->
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-cassandra</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-webmvc</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-docker-compose</artifactId>
-            <scope>runtime</scope>
-            <optional>true</optional>
-        </dependency>
-
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-cassandra-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
-
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-            </plugin>
-        </plugins>
-    </build>
 
 </project>

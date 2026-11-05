@@ -1,6 +1,6 @@
 services:
   # Single-node Cassandra for local development.
-  # The official image ships with authentication disabled, so no username or password is needed.
+  # The official image has authentication turned off, so there's no username or password.
   cassandra:
     image: cassandra:4.1
     container_name: toshokan-cassandra
@@ -9,7 +9,8 @@ services:
     environment:
       MAX_HEAP_SIZE: 1G
       HEAP_NEWSIZE: 200M
-    # Start Cassandra normally, and in the background create the app's keyspace once CQL is reachable.
+    # Runs Cassandra as usual. Meanwhile, a background loop keeps trying to create the toshokan
+    # keyspace until Cassandra starts accepting connections.
     command:
       - bash
       - -c
@@ -18,7 +19,7 @@ services:
         exec docker-entrypoint.sh cassandra -f
     volumes:
       - cassandra-data:/var/lib/cassandra
-    # Healthy only once the keyspace exists, so the app never connects too early.
+    # Only reports healthy once the keyspace exists, so the app can't connect before it's there.
     healthcheck:
       test: ["CMD", "cqlsh", "-e", "DESCRIBE KEYSPACE toshokan"]
       interval: 10s
