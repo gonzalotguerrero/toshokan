@@ -74,4 +74,18 @@ class BookTextNormalizerTest {
         assertThat(BookTextNormalizer.blankToNull("  ")).isNull();
         assertThat(BookTextNormalizer.blankToNull(" Ace ")).isEqualTo("Ace");
     }
+
+    @Test
+    void searchKeysIgnoreCaseSpacingAndWidth() {
+        assertThat(BookTextNormalizer.searchKey("  The   Left Hand of DARKNESS ")).isEqualTo("the left hand of darkness");
+        // Full-width letters, as a Japanese keyboard might type them
+        assertThat(BookTextNormalizer.searchKey("\uFF24\uFF55\uFF4E\uFF45")).isEqualTo("dune");
+        // Half-width katakana become the ordinary full-width ones
+        assertThat(BookTextNormalizer.searchKey("\uFF7A\uFF7A\uFF9B")).isEqualTo("\u30B3\u30B3\u30ED");
+    }
+
+    @Test
+    void searchKeysStillMatchWholeValuesOnly() {
+        assertThat(BookTextNormalizer.searchKey("Dune Messiah")).isNotEqualTo(BookTextNormalizer.searchKey("Dune"));
+    }
 }

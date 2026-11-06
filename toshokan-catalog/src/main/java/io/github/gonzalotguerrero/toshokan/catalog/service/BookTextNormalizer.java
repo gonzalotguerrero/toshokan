@@ -2,6 +2,7 @@ package io.github.gonzalotguerrero.toshokan.catalog.service;
 
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.InvalidRequestException;
 
+import java.text.Normalizer;
 import java.util.Collection;
 import java.util.Locale;
 import java.util.Set;
@@ -58,6 +59,16 @@ public final class BookTextNormalizer {
             throw new InvalidRequestException("isbn must have 10 or 13 digits (an ISBN-10 may end in X)");
         }
         return normalized;
+    }
+
+    /**
+     * The form a title or author name is matched by when searching. It's still a whole-value match, but case,
+     * extra spaces and character width don't count, so "dune", "  DUNE " and full-width "ＤＵＮＥ" all match "Dune".
+     * NFKC is what turns full-width letters (and other look-alike forms) into the ordinary ones.
+     */
+    public static String searchKey(String value) {
+        String text = Normalizer.normalize(value, Normalizer.Form.NFKC);
+        return WHITESPACE.matcher(text.strip()).replaceAll(" ").toLowerCase(Locale.ROOT);
     }
 
     /** Trims optional text. A blank value counts as not given. */

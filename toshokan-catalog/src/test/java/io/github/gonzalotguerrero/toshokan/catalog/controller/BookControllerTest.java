@@ -4,7 +4,9 @@ import io.github.gonzalotguerrero.toshokan.catalog.dto.BookDetails;
 import io.github.gonzalotguerrero.toshokan.catalog.dto.CreateBookRequest;
 import io.github.gonzalotguerrero.toshokan.catalog.service.BookService;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.ConflictException;
+import io.github.gonzalotguerrero.toshokan.shared.exceptions.InvalidRequestException;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.NotFoundException;
+import io.github.gonzalotguerrero.toshokan.shared.paging.PageResponse;
 import io.github.gonzalotguerrero.toshokan.shared.web.ApiExceptionHandlerAdvice;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -146,5 +148,36 @@ class BookControllerTest {
                 .andExpect(status().isBadRequest());
 
         verifyNoInteractions(service);
+    }
+
+    @Test
+    void searchesBooksByAuthor() throws Exception {
+        when(service.searchBooks(null, "Frank Herbert", null, 20, null))
+                .thenReturn(new PageResponse<>(List.of(DUNE), "next"));
+
+        mockMvc.perform(get("/api/v1/books/search").param("author", "Frank Herbert"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].title").value("Dune"))
+                .andExpect(jsonPath("$.nextPageToken").value("next"));
+    }
+
+    @Test
+    void passesThePagingThroughWhenSearchingByTitle() throws Exception {
+        when(service.searchBooks(null, null, "Dune", 5, "abc")).thenReturn(new PageResponse<>(List.of(DUNE), null));
+
+        mockMvc.perform(get("/api/v1/books/search").param("title", "Dune").param("pageSize", "5")
+                        .param("pageToken", "abc"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].bookId").value(DUNE.bookId().toString()));
+    }
+
+    @Test
+    void answersASearchWithoutCriteriaWithBadRequest() throws Exception {
+        when(service.searchBooks(null, null, null, 20, null))
+                .thenThrow(new InvalidRequestException("Search by exactly one of isbn, author or title"));
+
+        mockMvc.perform(get("/api/v1/books/search"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value("Search by exactly one of isbn, author or title"));
     }
 }

@@ -3,24 +3,30 @@ package io.github.gonzalotguerrero.toshokan.catalog;
 import io.github.gonzalotguerrero.toshokan.TestcontainersConfiguration;
 import io.github.gonzalotguerrero.toshokan.catalog.dto.BookDetails;
 import io.github.gonzalotguerrero.toshokan.catalog.model.Book;
+import io.github.gonzalotguerrero.toshokan.catalog.model.BookByAuthor;
 import io.github.gonzalotguerrero.toshokan.catalog.model.BookByIsbn;
+import io.github.gonzalotguerrero.toshokan.catalog.model.BookByTitle;
+import io.github.gonzalotguerrero.toshokan.shared.paging.PageResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.data.cassandra.core.CassandraOperations;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.client.EntityExchangeResult;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Creates and fetches books through the running app, backed by a real Cassandra. Normalization and ISBN
+ * Creates, fetches and searches books through the running app, backed by a real Cassandra. Normalization and ISBN
  * uniqueness are tested here too, since you only know they work once the data has been saved and read back.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -39,6 +45,8 @@ class BookApiIntegrationTest {
     void setUp() {
         cassandra.truncate(Book.class);
         cassandra.truncate(BookByIsbn.class);
+        cassandra.truncate(BookByTitle.class);
+        cassandra.truncate(BookByAuthor.class);
         client = RestTestClient.bindToServer().baseUrl("http://localhost:" + port + "/toshokan").build();
     }
 
@@ -129,6 +137,83 @@ class BookApiIntegrationTest {
     void answersAnUnknownBookWithNotFound() {
         client.get().uri("/api/v1/books/{bookId}", UUID.randomUUID()).exchange()
                 .expectStatus().isNotFound();
+    }
+
+    @Test
+    void findsAnAuthorsBooksSortedByTitleHoweverTheNameIsTyped() {
+        createBook(book("Dune", 1965, "Frank Herbert"));
+        createBook(book("Children of Dune", 1976, "Frank Herbert"));
+        createBook(book("Good Omens", 1990, "Terry Pratchett", "Neil Gaiman"));
+
+        assertThat(search(Map.of("author", "  frank   HERBERT ")).items()).extracting(BookDetails::title)
+                .containsExactly("Children of Dune", "Dune");
+        // A book with two authors can be found by either of them
+        assertThat(search(Map.of("author", "Neil Gaiman")).items()).extracting(BookDetails::title)
+                .containsExactly("Good Omens");
+        assertThat(search(Map.of("author", "Herbert")).items()).isEmpty();
+    }
+
+    @Test
+    void findsEveryEditionOfATitleNewestFirstButOnlyWholeTitles() {
+        createBook(book("Dune", 1965, "Frank Herbert"));
+        createBook(book("DUNE", 2005, "Frank Herbert"));
+        createBook(book("Dune Messiah", 1969, "Frank Herbert"));
+
+        // Typed in full-width letters
+        assertThat(search(Map.of("title", "Ｄｕｎｅ")).items())
+                .extracting(BookDetails::publicationYear).containsExactly(2005, 1965);
+    }
+
+    @Test
+    void findsABookByIsbn() {
+        BookDetails dune = createBook(bookWithIsbn("9780441013593"));
+
+        assertThat(search(Map.of("isbn", "978-0-441-01359-3")).items()).containsExactly(dune);
+        assertThat(search(Map.of("isbn", "9780000000002")).items()).isEmpty();
+    }
+
+    @Test
+    void searchResultsComeInPages() {
+        for (String title : List.of("Dune", "Children of Dune", "Dune Messiah")) {
+            createBook(book(title, 1970, "Frank Herbert"));
+        }
+
+        PageResponse<BookDetails> first = search(Map.of("author", "Frank Herbert", "pageSize", "2"));
+        PageResponse<BookDetails> second = search(Map.of("author", "Frank Herbert", "pageSize", "2",
+                "pageToken", first.nextPageToken()));
+
+        assertThat(first.items()).extracting(BookDetails::title).containsExactly("Children of Dune", "Dune");
+        assertThat(second.items()).extracting(BookDetails::title).containsExactly("Dune Messiah");
+    }
+
+    @Test
+    void needsExactlyOneThingToSearchBy() {
+        client.get().uri("/api/v1/books/search").exchange().expectStatus().isBadRequest();
+        client.get().uri(builder -> builder.path("/api/v1/books/search").queryParam("title", "Dune")
+                        .queryParam("author", "Frank Herbert").build())
+                .exchange().expectStatus().isBadRequest();
+    }
+
+    private PageResponse<BookDetails> search(Map<String, String> params) {
+        return client.get()
+                .uri(builder -> {
+                    builder.path("/api/v1/books/search");
+                    params.forEach(builder::queryParam);
+                    return builder.build();
+                })
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(new ParameterizedTypeReference<PageResponse<BookDetails>>() {
+                })
+                .returnResult()
+                .getResponseBody();
+    }
+
+    private static String book(String title, int year, String... authors) {
+        return """
+                {"title": "%s", "authors": ["%s"], "publicationYear": %d, "language": "English",
+                 "genres": ["Science fiction"]}
+                """.formatted(title, String.join("\", \"", authors), year);
     }
 
     private BookDetails createBook(String json) {
