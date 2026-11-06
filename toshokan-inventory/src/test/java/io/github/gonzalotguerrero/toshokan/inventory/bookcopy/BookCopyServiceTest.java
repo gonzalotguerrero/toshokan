@@ -105,7 +105,7 @@ class BookCopyServiceTest {
 
         assertThatThrownBy(() -> service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("LIB-000123")))
                 .isInstanceOf(IllegalStateException.class);
-        verify(inventoryNumbers).release("LIB-000123");
+        verify(inventoryNumbers).release(eq("LIB-000123"), eq(DUNE.bookId()), any());
         verifyNoInteractions(holdingsRefresher);
     }
 
@@ -118,7 +118,7 @@ class BookCopyServiceTest {
         BookCopyDetails added = service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("LIB-000123"));
 
         assertThat(added.inventoryNumber()).isEqualTo("LIB-000123");
-        verify(inventoryNumbers, never()).release(anyString());
+        verify(inventoryNumbers, never()).release(anyString(), any(), any());
     }
 
     @Test
@@ -220,7 +220,7 @@ class BookCopyServiceTest {
         verify(statusChanges).change(copy, BookCopyStatus.WITHDRAWN);
         verify(holdingsRefresher).refresh(DUNE);
         // The number stays taken, so it can't be handed to a new copy and get mixed up with the old record
-        verify(inventoryNumbers, never()).release(anyString());
+        verify(inventoryNumbers, never()).release(anyString(), any(), any());
     }
 
     @Test

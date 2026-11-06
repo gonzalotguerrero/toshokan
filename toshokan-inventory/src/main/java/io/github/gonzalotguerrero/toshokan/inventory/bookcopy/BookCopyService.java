@@ -55,7 +55,7 @@ public class BookCopyService {
         try {
             newCopies.insert(copy);
         } catch (RuntimeException e) {
-            inventoryNumbers.release(inventoryNumber);
+            inventoryNumbers.release(inventoryNumber, bookId, copy.bookCopyId());
             throw e;
         }
         log.info("Added copy {} ({}) of book {}", copy.bookCopyId(), inventoryNumber, bookId);

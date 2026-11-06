@@ -69,7 +69,7 @@ public class BookService {
             books.insert(book);
         } catch (RuntimeException e) {
             if (isbn != null) {
-                isbnClaims.release(isbn);
+                isbnClaims.release(isbn, book.bookId());
             }
             throw e;
         }

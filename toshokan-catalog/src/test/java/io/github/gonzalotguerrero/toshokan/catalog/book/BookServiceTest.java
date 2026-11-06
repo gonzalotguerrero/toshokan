@@ -103,7 +103,7 @@ class BookServiceTest {
 
         assertThatThrownBy(() -> service.createBook(request("9780441013593")))
                 .isInstanceOf(IllegalStateException.class);
-        verify(isbnClaims).release("9780441013593");
+        verify(isbnClaims).release(eq("9780441013593"), any());
     }
 
     @Test
