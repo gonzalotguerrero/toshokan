@@ -1,6 +1,7 @@
 package io.github.gonzalotguerrero.toshokan.inventory;
 
 import io.github.gonzalotguerrero.toshokan.TestcontainersConfiguration;
+import io.github.gonzalotguerrero.toshokan.catalog.model.Book;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookSummary;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookHoldings;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookHoldingsRepository;
@@ -10,8 +11,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
+import org.springframework.data.cassandra.core.CassandraOperations;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -34,11 +37,15 @@ class BookHoldingsApiIntegrationTest {
     @Autowired
     private BookHoldingsRepository repository;
 
+    @Autowired
+    private CassandraOperations cassandra;
+
     private RestTestClient client;
 
     @BeforeEach
     void setUp() {
         repository.deleteAll();
+        cassandra.truncate(Book.class);
         client = RestTestClient.bindToServer().baseUrl("http://localhost:" + port + "/toshokan").build();
     }
 
@@ -101,6 +108,16 @@ class BookHoldingsApiIntegrationTest {
     }
 
     @Test
+    void leavesOutATitleWhoseBookNoLongerExists() {
+        save("Dune", 3, 1);
+        // What a delete leaves behind if refreshing the holdings failed: a row for a book that's gone
+        repository.save(BookHoldings.of(UUID.randomUUID(), null, "Bygone", List.of("Someone"), null, 1990, "en",
+                Set.of("fiction"), 1, 1));
+
+        assertThat(getBooks("/api/v1/books").items()).extracting(BookSummary::title).containsExactly("Dune");
+    }
+
+    @Test
     void rejectsAnInvalidPageToken() {
         save("Dune", 3, 1);
 
@@ -123,8 +140,12 @@ class BookHoldingsApiIntegrationTest {
                 .expectStatus().isNotFound();
     }
 
+    /** A holdings row, plus the book it belongs to, since the listing leaves out rows whose book is gone. */
     private BookHoldings save(String title, int totalCopies, int availableCopies) {
-        return repository.save(BookHoldings.of(UUID.randomUUID(), "isbn-" + title, title, List.of("Some Author"),
+        UUID bookId = UUID.randomUUID();
+        cassandra.insert(new Book(bookId, "isbn-" + title, title, List.of("Some Author"), "Some Publisher", 2001,
+                "en", Set.of("fiction"), Instant.now()));
+        return repository.save(BookHoldings.of(bookId, "isbn-" + title, title, List.of("Some Author"),
                 "Some Publisher", 2001, "en", Set.of("fiction"), totalCopies, availableCopies));
     }
 

@@ -77,8 +77,8 @@ then send the `nextPageToken` from the previous page:
 }
 ```
 
-`nextPageToken` is `null` on the last page. Loan history and member list pages can have fewer items than
-`pageSize` even when more pages follow (the [design notes](design.md#keeping-the-data-consistent) explain why).
+`nextPageToken` is `null` on the last page. Loan history, member list and `GET /books` pages can have fewer
+items than `pageSize` even when more pages follow (the [design notes](design.md#keeping-the-data-consistent) explain why).
 
 ## Errors
 

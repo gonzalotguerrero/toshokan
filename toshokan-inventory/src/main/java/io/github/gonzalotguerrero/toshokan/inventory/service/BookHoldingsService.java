@@ -1,5 +1,6 @@
 package io.github.gonzalotguerrero.toshokan.inventory.service;
 
+import io.github.gonzalotguerrero.toshokan.catalog.service.BookService;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookSummary;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookHoldings;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookHoldingsRepository;
@@ -15,6 +16,9 @@ import org.springframework.data.domain.Slice;
 import org.springframework.stereotype.Service;
 
 import java.nio.ByteBuffer;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class BookHoldingsService {
@@ -25,13 +29,20 @@ public class BookHoldingsService {
     private static final Logger log = LoggerFactory.getLogger(BookHoldingsService.class);
 
     private final BookHoldingsRepository repository;
+    private final BookService books;
 
-    public BookHoldingsService(BookHoldingsRepository repository) {
+    public BookHoldingsService(BookHoldingsRepository repository, BookService books) {
         this.repository = repository;
+        this.books = books;
     }
 
     /**
      * Lists the titles the library owns, one page at a time.
+     *
+     * <p>Rows whose book no longer exists are skipped. A book's holdings are only fixed by the next change to one
+     * of its copies, and after a book is deleted there never is one, so a refresh that failed during the delete
+     * would otherwise leave the title listed for good. Because of that, a page can have fewer items than asked
+     * for even when more pages follow.
      *
      * @param onlyAvailable if {@code true}, leave out titles whose copies are all lent out
      * @param pageSize      between 1 and {@value #MAX_PAGE_SIZE}
@@ -63,7 +74,13 @@ public class BookHoldingsService {
         String nextPageToken = slice.hasNext()
                 ? PageTokens.encode(((CassandraPageRequest) slice.nextPageable()).getPagingState())
                 : null;
-        log.debug("Returning {} books (more pages: {})", slice.getNumberOfElements(), nextPageToken != null);
-        return new PageResponse<>(slice.map(BookSummary::from).getContent(), nextPageToken);
+        List<BookHoldings> rows = slice.getContent();
+        Set<UUID> existing = books.findExistingBookIds(rows.stream().map(BookHoldings::bookId).toList());
+        List<BookSummary> page = rows.stream()
+                .filter(row -> existing.contains(row.bookId()))
+                .map(BookSummary::from)
+                .toList();
+        log.debug("Returning {} books (more pages: {})", page.size(), nextPageToken != null);
+        return new PageResponse<>(page, nextPageToken);
     }
 }

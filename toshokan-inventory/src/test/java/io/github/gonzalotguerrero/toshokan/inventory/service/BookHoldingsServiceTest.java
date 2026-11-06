@@ -1,5 +1,6 @@
 package io.github.gonzalotguerrero.toshokan.inventory.service;
 
+import io.github.gonzalotguerrero.toshokan.catalog.service.BookService;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookSummary;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookHoldings;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookHoldingsRepository;
@@ -44,12 +45,16 @@ class BookHoldingsServiceTest {
     @Mock
     private BookHoldingsRepository repository;
 
+    @Mock
+    private BookService books;
+
     @InjectMocks
     private BookHoldingsService service;
 
     @Test
     void listsAllTitlesWhenNotFilteringByAvailability() {
         when(repository.findByHoldingsPartition(eq(HOLDINGS_PARTITION), any())).thenReturn(lastSlice(List.of(DUNE)));
+        when(books.findExistingBookIds(List.of(DUNE.bookId()))).thenReturn(Set.of(DUNE.bookId()));
 
         PageResponse<BookSummary> page = service.listBooks(false, 20, null);
 
@@ -61,6 +66,22 @@ class BookHoldingsServiceTest {
             assertThat(book.availableCopies()).isEqualTo(1);
         });
         assertThat(page.nextPageToken()).isNull();
+    }
+
+    @Test
+    void skipsTitlesWhoseBookWasDeleted() {
+        BookHoldings anathem = BookHoldings.of(UUID.randomUUID(), null, "Anathem", List.of("Neal Stephenson"), null,
+                2008, "en", Set.of("science fiction"), 1, 1);
+        BookHoldings deleted = BookHoldings.of(UUID.randomUUID(), null, "Bygone", List.of("Someone"), null, 1990,
+                "en", Set.of("fiction"), 1, 1);
+        when(repository.findByHoldingsPartition(eq(HOLDINGS_PARTITION), any()))
+                .thenReturn(lastSlice(List.of(anathem, deleted, DUNE)));
+        when(books.findExistingBookIds(List.of(anathem.bookId(), deleted.bookId(), DUNE.bookId())))
+                .thenReturn(Set.of(anathem.bookId(), DUNE.bookId()));
+
+        PageResponse<BookSummary> page = service.listBooks(false, 20, null);
+
+        assertThat(page.items()).extracting(BookSummary::title).containsExactly("Anathem", "Dune");
     }
 
     @Test

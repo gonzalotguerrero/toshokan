@@ -33,10 +33,13 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.Year;
 import java.time.temporal.ChronoUnit;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static io.github.gonzalotguerrero.toshokan.catalog.service.BookTextNormalizer.blankToNull;
@@ -150,6 +153,14 @@ public class BookService {
     /** Used by other modules to check that a book exists, or to read its details. */
     public Optional<BookDetails> findBook(UUID bookId) {
         return books.findById(bookId).map(BookDetails::from);
+    }
+
+    /** Which of these books still exist, read in one go. Used by inventory to skip rows about deleted books. */
+    public Set<UUID> findExistingBookIds(Collection<UUID> bookIds) {
+        if (bookIds.isEmpty()) {
+            return Set.of();
+        }
+        return books.findAllById(bookIds).stream().map(Book::bookId).collect(Collectors.toSet());
     }
 
     /**

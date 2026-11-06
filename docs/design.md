@@ -88,3 +88,6 @@ renaming back. As with loan history, skipped entries mean a page can have fewer 
 The counts behind `GET /books` are recounted from a book's copies every time one of them changes. If a recount
 fails, the counts stay wrong until the next change to that book's copies. This is a deliberate trade-off that
 keeps every copy change to a single conditional write.
+
+A deleted book's copies never change again, so a recount that failed during the delete would never be fixed. To
+cover that, the listing checks each page's rows against `books` and leaves out titles that no longer exist.
