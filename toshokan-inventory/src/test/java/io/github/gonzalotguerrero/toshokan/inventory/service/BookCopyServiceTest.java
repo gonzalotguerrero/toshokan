@@ -10,6 +10,7 @@ import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopyByInventoryNu
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyByInventoryNumberRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyStatusChanges;
+import io.github.gonzalotguerrero.toshokan.inventory.repository.BookLocks;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.InventoryNumberClaims;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.NewBookCopyInserter;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.ConflictException;
@@ -30,6 +31,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -75,16 +77,20 @@ class BookCopyServiceTest {
     @Mock
     private BookHoldingsRefresher holdingsRefresher;
 
+    @Mock
+    private BookLocks locks;
+
     private BookCopyService service;
 
     @BeforeEach
     void setUp() {
         service = new BookCopyService(books, copies, copiesByInventoryNumber, inventoryNumbers, newCopies,
-                statusChanges, holdingsRefresher, CLOCK);
+                statusChanges, holdingsRefresher, locks, CLOCK);
     }
 
     @Test
     void addsAnAvailableCopyAndRefreshesTheHoldings() {
+        givenTheLockIsFree();
         when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
         when(inventoryNumbers.claim(eq("LIB-000123"), eq(DUNE.bookId()), any())).thenReturn(true);
 
@@ -103,6 +109,7 @@ class BookCopyServiceTest {
     @Test
     void failsWithNotFoundForAnUnknownBook() {
         UUID bookId = UUID.randomUUID();
+        when(locks.whileLocked(eq(bookId), any())).thenAnswer(call -> call.<Supplier<?>>getArgument(1).get());
         when(books.findBook(bookId)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.addBookCopy(bookId, new AddBookCopyRequest("LIB-000123")))
@@ -113,6 +120,7 @@ class BookCopyServiceTest {
 
     @Test
     void rejectsAnInventoryNumberAlreadyInUse() {
+        givenTheLockIsFree();
         when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
         when(inventoryNumbers.claim(anyString(), any(), any())).thenReturn(false);
 
@@ -125,6 +133,7 @@ class BookCopyServiceTest {
 
     @Test
     void givesTheInventoryNumberBackIfSavingTheCopyFails() {
+        givenTheLockIsFree();
         when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
         when(inventoryNumbers.claim(anyString(), any(), any())).thenReturn(true);
         doThrow(new IllegalStateException("Cassandra is down")).when(newCopies).insert(any(BookCopy.class));
@@ -137,6 +146,7 @@ class BookCopyServiceTest {
 
     @Test
     void stillReturnsTheCopyWhenTheHoldingsCannotBeRefreshed() {
+        givenTheLockIsFree();
         when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
         when(inventoryNumbers.claim(anyString(), any(), any())).thenReturn(true);
         doThrow(new IllegalStateException("Cassandra hiccup")).when(holdingsRefresher).refresh(DUNE);
@@ -233,6 +243,43 @@ class BookCopyServiceTest {
         assertThatThrownBy(() -> service.changeStatus(DUNE.bookId(), bookCopyId, BookCopyStatus.DAMAGED))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessage("Book " + DUNE.bookId() + " has no copy with id " + bookCopyId);
+    }
+
+    @Test
+    void bringingACopyBackFromWithdrawnHoldsTheBookLock() {
+        BookCopy copy = copy("LIB-000001", BookCopyStatus.WITHDRAWN);
+        givenExistingCopy(copy);
+        givenTheLockIsFree();
+        when(statusChanges.change(copy, BookCopyStatus.AVAILABLE)).thenReturn(true);
+
+        BookCopyDetails changed = service.changeStatus(DUNE.bookId(), copy.bookCopyId(), BookCopyStatus.AVAILABLE);
+
+        assertThat(changed.status()).isEqualTo(BookCopyStatus.AVAILABLE);
+        verify(locks).whileLocked(eq(DUNE.bookId()), any());
+    }
+
+    @Test
+    void cannotBringACopyBackIfItsBookWasDeletedMeanwhile() {
+        BookCopy copy = copy("LIB-000001", BookCopyStatus.WITHDRAWN);
+        givenStoredCopy(copy);
+        givenTheLockIsFree();
+        // There when the request starts, gone once the lock is held
+        when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE), Optional.empty());
+
+        assertThatThrownBy(() -> service.changeStatus(DUNE.bookId(), copy.bookCopyId(), BookCopyStatus.AVAILABLE))
+                .isInstanceOf(NotFoundException.class);
+        verifyNoInteractions(statusChanges);
+    }
+
+    @Test
+    void otherStatusChangesDoNotNeedTheLock() {
+        BookCopy copy = copy("LIB-000001", BookCopyStatus.AVAILABLE);
+        givenExistingCopy(copy);
+        when(statusChanges.change(copy, BookCopyStatus.DAMAGED)).thenReturn(true);
+
+        service.changeStatus(DUNE.bookId(), copy.bookCopyId(), BookCopyStatus.DAMAGED);
+
+        verifyNoInteractions(locks);
     }
 
     @Test
@@ -411,6 +458,11 @@ class BookCopyServiceTest {
     private static BookCopy lentCopy(LocalDate dueDate, int renewals) {
         return new BookCopy(DUNE.bookId(), UUID.randomUUID(), "LIB-000001", BookCopyStatus.LENT, Instant.now(),
                 UUID.randomUUID(), MEMBER_ID, Instant.parse("2026-06-01T10:00:00Z"), dueDate, renewals);
+    }
+
+    /** Makes the lock behave like nobody else is working on the book: it just runs the work. */
+    private void givenTheLockIsFree() {
+        when(locks.whileLocked(eq(DUNE.bookId()), any())).thenAnswer(call -> call.<Supplier<?>>getArgument(1).get());
     }
 
     private void givenExistingCopy(BookCopy copy) {

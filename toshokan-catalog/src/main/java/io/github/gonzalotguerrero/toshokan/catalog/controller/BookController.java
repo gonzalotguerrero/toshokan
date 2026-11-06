@@ -5,20 +5,23 @@ import io.github.gonzalotguerrero.toshokan.catalog.dto.CreateBookRequest;
 import io.github.gonzalotguerrero.toshokan.catalog.service.BookService;
 import io.github.gonzalotguerrero.toshokan.shared.paging.PageResponse;
 import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import java.net.URI;
 import java.util.UUID;
 
-/** Creating, fetching and searching books. */
+/** Creating, fetching, searching and deleting books. */
 @RestController
 @RequestMapping("/api/v1/books")
 public class BookController {
@@ -42,6 +45,13 @@ public class BookController {
     @GetMapping("/{bookId}")
     public BookDetails getBook(@PathVariable("bookId") UUID bookId) {
         return service.getBook(bookId);
+    }
+
+    /** Only works once every copy of the book has been withdrawn, or if it never had any. */
+    @DeleteMapping("/{bookId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void deleteBook(@PathVariable("bookId") UUID bookId) {
+        service.deleteBook(bookId);
     }
 
     /** Takes exactly one of {@code isbn}, {@code author} or {@code title}. */

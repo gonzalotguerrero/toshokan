@@ -29,6 +29,7 @@ import org.springframework.stereotype.Service;
 
 import java.nio.ByteBuffer;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.Year;
 import java.time.temporal.ChronoUnit;
@@ -52,6 +53,13 @@ public class BookService {
     public static final int DEFAULT_PAGE_SIZE = 20;
     public static final int MAX_PAGE_SIZE = 100;
 
+    /*
+     * How old a claim on an ISBN has to be before a new book may take it over from a book that doesn't exist. A
+     * create claims the ISBN a moment before it saves the book, and a logged batch that timed out can take a few
+     * seconds to be applied, so a young claim may still be about to get its book.
+     */
+    private static final Duration STALE_CLAIM_AGE = Duration.ofMinutes(10);
+
     // The write type Cassandra reports when a logged batch timed out after it was already written to the batch log
     private static final String BATCH_ALREADY_LOGGED = "BATCH";
 
@@ -61,24 +69,27 @@ public class BookService {
     private final BookByAuthorRepository booksByAuthor;
     private final BookWriter writer;
     private final IsbnClaims isbnClaims;
+    private final BookDeletionGuard deletionGuard;
     private final Clock clock;
 
     @Autowired
     public BookService(BookRepository books, BookByIsbnRepository booksByIsbn, BookByTitleRepository booksByTitle,
-                       BookByAuthorRepository booksByAuthor, BookWriter writer, IsbnClaims isbnClaims) {
-        this(books, booksByIsbn, booksByTitle, booksByAuthor, writer, isbnClaims, Clock.systemUTC());
+                       BookByAuthorRepository booksByAuthor, BookWriter writer, IsbnClaims isbnClaims,
+                       BookDeletionGuard deletionGuard) {
+        this(books, booksByIsbn, booksByTitle, booksByAuthor, writer, isbnClaims, deletionGuard, Clock.systemUTC());
     }
 
     /** Tests use this to fix the clock, so the "no future years" check gives the same result whenever they run. */
     public BookService(BookRepository books, BookByIsbnRepository booksByIsbn, BookByTitleRepository booksByTitle,
                        BookByAuthorRepository booksByAuthor, BookWriter writer, IsbnClaims isbnClaims,
-                       Clock clock) {
+                       BookDeletionGuard deletionGuard, Clock clock) {
         this.books = books;
         this.booksByIsbn = booksByIsbn;
         this.booksByTitle = booksByTitle;
         this.booksByAuthor = booksByAuthor;
         this.writer = writer;
         this.isbnClaims = isbnClaims;
+        this.deletionGuard = deletionGuard;
         this.clock = clock;
     }
 
@@ -103,7 +114,7 @@ public class BookService {
                 normalizeGenres(request.genres()),
                 Instant.now(clock).truncatedTo(ChronoUnit.MILLIS));
 
-        if (isbn != null && !isbnClaims.claim(isbn, book.bookId())) {
+        if (isbn != null && !claimIsbn(isbn, book.bookId())) {
             throw new ConflictException("A book with ISBN " + isbn + " already exists");
         }
         try {
@@ -123,6 +134,28 @@ public class BookService {
         }
         log.info("Created book {} \"{}\"", book.bookId(), book.title());
         return BookDetails.from(book);
+    }
+
+    /**
+     * Deletes a book, as long as it has no copies or only withdrawn ones (inventory decides that, see
+     * {@link BookDeletionGuard}). Withdrawn copies and loan history stay as a record. The ISBN is freed afterwards,
+     * so the same edition can be catalogued again later.
+     */
+    public void deleteBook(UUID bookId) {
+        Book book = books.findById(bookId).orElseThrow(() -> new NotFoundException("No book with id " + bookId));
+        deletionGuard.runGuarded(BookDetails.from(book), () -> writer.delete(book));
+        log.info("Deleted book {} \"{}\"", book.bookId(), book.title());
+        if (book.isbn() != null) {
+            // Only after the book is gone: freeing it first would let another book take the ISBN while this one
+            // still existed
+            try {
+                isbnClaims.release(book.isbn(), bookId);
+            } catch (RuntimeException e) {
+                // The book is deleted either way. The claim now points at a book that doesn't exist, and the next
+                // book with this ISBN takes it over (see claimIsbn)
+                log.warn("Couldn't free ISBN {} of deleted book {}", book.isbn(), bookId, e);
+            }
+        }
     }
 
     public BookDetails getBook(UUID bookId) {
@@ -167,6 +200,30 @@ public class BookService {
         String key = searchKey(givenTitle);
         Slice<BookByTitle> slice = page(pageSize, pageToken, request -> booksByTitle.findByTitleKey(key, request));
         return new PageResponse<>(slice.map(row -> BookDetails.from(row.toBook())).getContent(), nextToken(slice));
+    }
+
+    /**
+     * Claims an ISBN for a new book. If another book holds it, the claim is only taken over when that book doesn't
+     * exist and the claim is old enough that it never will (see {@link #STALE_CLAIM_AGE}). That happens when a
+     * create failed, or a delete couldn't free the ISBN.
+     */
+    private boolean claimIsbn(String isbn, UUID bookId) {
+        if (isbnClaims.claim(isbn, bookId)) {
+            return true;
+        }
+        Optional<IsbnClaims.Claim> current = isbnClaims.currentClaim(isbn);
+        if (current.isEmpty()) {
+            // Freed between our claim and this read, so it's worth one more try
+            return isbnClaims.claim(isbn, bookId);
+        }
+        IsbnClaims.Claim claim = current.get();
+        boolean stale = claim.claimedAt().isBefore(clock.instant().minus(STALE_CLAIM_AGE))
+                && books.findById(claim.bookId()).isEmpty();
+        if (stale && isbnClaims.takeOver(isbn, claim.bookId(), bookId)) {
+            log.info("Took over ISBN {} from book {}, which doesn't exist", isbn, claim.bookId());
+            return true;
+        }
+        return false;
     }
 
     private static <T> Slice<T> page(int pageSize, String pageToken, Function<CassandraPageRequest, Slice<T>> query) {

@@ -13,6 +13,7 @@ import java.util.List;
 /**
  * Saves a new book together with its search rows (by title and by author) in one logged batch. Either all of them
  * end up written or none do, so a book can always be found by its title and authors as soon as it exists.
+ * Deleting works the same way, so a deleted book never lingers in the search.
  */
 @Component
 public class BookWriter {
@@ -24,10 +25,18 @@ public class BookWriter {
     }
 
     public void save(Book book) {
+        cassandra.batchOps(BatchType.LOGGED).insert(rowsOf(book)).execute();
+    }
+
+    public void delete(Book book) {
+        cassandra.batchOps(BatchType.LOGGED).delete(rowsOf(book)).execute();
+    }
+
+    private static List<Object> rowsOf(Book book) {
         List<Object> rows = new ArrayList<>();
         rows.add(book);
         rows.add(BookByTitle.of(book));
         rows.addAll(BookByAuthor.of(book));
-        cassandra.batchOps(BatchType.LOGGED).insert(rows).execute();
+        return rows;
     }
 }

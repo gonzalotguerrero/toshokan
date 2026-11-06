@@ -9,6 +9,7 @@ import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopyStatus;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyByInventoryNumberRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyStatusChanges;
+import io.github.gonzalotguerrero.toshokan.inventory.repository.BookLocks;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.InventoryNumberClaims;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.NewBookCopyInserter;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.ConflictException;
@@ -40,12 +41,14 @@ public class BookCopyService {
     private final NewBookCopyInserter newCopies;
     private final BookCopyStatusChanges statusChanges;
     private final BookHoldingsRefresher holdingsRefresher;
+    private final BookLocks locks;
     private final Clock clock;
 
     public BookCopyService(BookService books, BookCopyRepository copies,
                            BookCopyByInventoryNumberRepository copiesByInventoryNumber,
                            InventoryNumberClaims inventoryNumbers, NewBookCopyInserter newCopies,
-                           BookCopyStatusChanges statusChanges, BookHoldingsRefresher holdingsRefresher, Clock clock) {
+                           BookCopyStatusChanges statusChanges, BookHoldingsRefresher holdingsRefresher,
+                           BookLocks locks, Clock clock) {
         this.books = books;
         this.copies = copies;
         this.copiesByInventoryNumber = copiesByInventoryNumber;
@@ -53,14 +56,20 @@ public class BookCopyService {
         this.newCopies = newCopies;
         this.statusChanges = statusChanges;
         this.holdingsRefresher = holdingsRefresher;
+        this.locks = locks;
         this.clock = clock;
     }
 
     /**
      * Adds a new copy of a book, on the shelf and ready to be lent. If it's the book's first copy, the book
-     * appears in the holdings; otherwise its counts go up.
+     * appears in the holdings; otherwise its counts go up. It holds the book's lock, so the book can't be deleted
+     * while the copy is being added.
      */
     public BookCopyDetails addBookCopy(UUID bookId, AddBookCopyRequest request) {
+        return locks.whileLocked(bookId, () -> insertCopy(bookId, request));
+    }
+
+    private BookCopyDetails insertCopy(UUID bookId, AddBookCopyRequest request) {
         BookDetails book = requireBook(bookId);
         String inventoryNumber = request.inventoryNumber().strip();
         BookCopy copy = BookCopy.newCopy(bookId, UUID.randomUUID(), inventoryNumber, now());
@@ -91,6 +100,9 @@ public class BookCopyService {
     /**
      * Changes a copy's status by hand, e.g. to mark it as damaged or put it back on the shelf. Anything to do
      * with {@link BookCopyStatus#LENT} is refused, because only lending and returning get to touch that.
+     *
+     * <p>Bringing a copy back from withdrawn holds the book's lock, like adding a copy does, so it can't happen
+     * while the book is being deleted. The book is read again under the lock, in case it was deleted just before.
      */
     public BookCopyDetails changeStatus(UUID bookId, UUID bookCopyId, BookCopyStatus newStatus) {
         if (newStatus == BookCopyStatus.LENT) {
@@ -98,6 +110,9 @@ public class BookCopyService {
         }
         BookDetails book = requireBook(bookId);
         BookCopy copy = requireCopy(bookId, bookCopyId);
+        if (copy.status() == BookCopyStatus.WITHDRAWN && newStatus != BookCopyStatus.WITHDRAWN) {
+            return locks.whileLocked(bookId, () -> details(applyStatus(requireBook(bookId), copy, newStatus)));
+        }
         return details(applyStatus(book, copy, newStatus));
     }
 

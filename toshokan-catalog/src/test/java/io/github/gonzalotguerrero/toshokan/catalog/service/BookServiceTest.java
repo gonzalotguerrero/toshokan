@@ -20,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DataAccessResourceFailureException;
@@ -27,6 +28,7 @@ import org.springframework.data.cassandra.CassandraWriteTimeoutException;
 import org.springframework.data.domain.SliceImpl;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -39,7 +41,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -69,12 +73,15 @@ class BookServiceTest {
     @Mock
     private IsbnClaims isbnClaims;
 
+    @Mock
+    private BookDeletionGuard deletionGuard;
+
     private BookService service;
 
     @BeforeEach
     void setUp() {
         service = new BookService(books, booksByIsbn, booksByTitle, booksByAuthor, writer, isbnClaims,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                deletionGuard, Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     @Test
@@ -118,12 +125,18 @@ class BookServiceTest {
 
     @Test
     void rejectsAnIsbnAnotherBookHas() {
+        Book other = new Book(UUID.randomUUID(), "9780441013593", "Dune", List.of("Frank Herbert"), null, 1965,
+                "English", Set.of("Fiction"), NOW);
         when(isbnClaims.claim(anyString(), any())).thenReturn(false);
+        when(isbnClaims.currentClaim("9780441013593"))
+                .thenReturn(Optional.of(new IsbnClaims.Claim(other.bookId(), NOW.minus(Duration.ofDays(30)))));
+        when(books.findById(other.bookId())).thenReturn(Optional.of(other));
 
         assertThatThrownBy(() -> service.createBook(request("9780441013593")))
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("A book with ISBN 9780441013593 already exists");
         verify(writer, never()).save(any());
+        verify(isbnClaims, never()).takeOver(any(), any(), any());
     }
 
     @Test
@@ -189,6 +202,102 @@ class BookServiceTest {
         assertThatThrownBy(() -> service.getBook(bookId))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessage("No book with id " + bookId);
+    }
+
+    @Test
+    void takesOverAnOldClaimWhoseBookDoesNotExist() {
+        UUID gone = UUID.randomUUID();
+        when(isbnClaims.claim(eq("9780441013593"), any())).thenReturn(false);
+        when(isbnClaims.currentClaim("9780441013593"))
+                .thenReturn(Optional.of(new IsbnClaims.Claim(gone, NOW.minus(Duration.ofHours(1)))));
+        when(books.findById(gone)).thenReturn(Optional.empty());
+        when(isbnClaims.takeOver(eq("9780441013593"), eq(gone), any())).thenReturn(true);
+
+        BookDetails created = service.createBook(request("9780441013593"));
+
+        verify(isbnClaims).takeOver("9780441013593", gone, created.bookId());
+        assertThat(captureInsertedBook().isbn()).isEqualTo("9780441013593");
+    }
+
+    @Test
+    void leavesAYoungClaimAloneEvenIfItsBookIsNotThereYet() {
+        // Another create may have claimed it a moment ago and be about to save its book
+        when(isbnClaims.claim(eq("9780441013593"), any())).thenReturn(false);
+        when(isbnClaims.currentClaim("9780441013593"))
+                .thenReturn(Optional.of(new IsbnClaims.Claim(UUID.randomUUID(), NOW.minusSeconds(5))));
+
+        assertThatThrownBy(() -> service.createBook(request("9780441013593")))
+                .isInstanceOf(ConflictException.class);
+        verify(isbnClaims, never()).takeOver(any(), any(), any());
+    }
+
+    @Test
+    void triesTheClaimAgainIfItWasFreedInTheMeantime() {
+        when(isbnClaims.claim(eq("9780441013593"), any())).thenReturn(false, true);
+        when(isbnClaims.currentClaim("9780441013593")).thenReturn(Optional.empty());
+
+        service.createBook(request("9780441013593"));
+
+        captureInsertedBook();
+    }
+
+    @Test
+    void deletesABookThroughTheGuardAndThenFreesItsIsbn() {
+        Book dune = new Book(UUID.randomUUID(), "9780441013593", "Dune", List.of("Frank Herbert"), null, 1965,
+                "English", Set.of("Fiction"), NOW);
+        when(books.findById(dune.bookId())).thenReturn(Optional.of(dune));
+        givenTheGuardAllowsDeletion();
+
+        service.deleteBook(dune.bookId());
+
+        InOrder order = inOrder(deletionGuard, writer, isbnClaims);
+        order.verify(deletionGuard).runGuarded(eq(BookDetails.from(dune)), any());
+        order.verify(writer).delete(dune);
+        // Only once the book is gone, or another book could take the ISBN while this one still exists
+        order.verify(isbnClaims).release("9780441013593", dune.bookId());
+    }
+
+    @Test
+    void theDeletionStandsEvenIfTheIsbnCannotBeFreed() {
+        Book dune = new Book(UUID.randomUUID(), "9780441013593", "Dune", List.of("Frank Herbert"), null, 1965,
+                "English", Set.of("Fiction"), NOW);
+        when(books.findById(dune.bookId())).thenReturn(Optional.of(dune));
+        givenTheGuardAllowsDeletion();
+        doThrow(new IllegalStateException("Cassandra is down")).when(isbnClaims).release(any(), any());
+
+        service.deleteBook(dune.bookId());
+
+        verify(writer).delete(dune);
+    }
+
+    @Test
+    void nothingIsDeletedWhenTheGuardRefuses() {
+        Book dune = new Book(UUID.randomUUID(), "9780441013593", "Dune", List.of("Frank Herbert"), null, 1965,
+                "English", Set.of("Fiction"), NOW);
+        when(books.findById(dune.bookId())).thenReturn(Optional.of(dune));
+        doThrow(new ConflictException("Book still has copies")).when(deletionGuard).runGuarded(any(), any());
+
+        assertThatThrownBy(() -> service.deleteBook(dune.bookId())).isInstanceOf(ConflictException.class);
+        verifyNoInteractions(writer, isbnClaims);
+    }
+
+    @Test
+    void deletingAnUnknownBookFailsWithNotFound() {
+        UUID bookId = UUID.randomUUID();
+        when(books.findById(bookId)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.deleteBook(bookId))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("No book with id " + bookId);
+        verifyNoInteractions(deletionGuard);
+    }
+
+    /** Makes the guard let the deletion through, like inventory would for a book without copies. */
+    private void givenTheGuardAllowsDeletion() {
+        doAnswer(call -> {
+            call.<Runnable>getArgument(1).run();
+            return null;
+        }).when(deletionGuard).runGuarded(any(), any());
     }
 
     @Test

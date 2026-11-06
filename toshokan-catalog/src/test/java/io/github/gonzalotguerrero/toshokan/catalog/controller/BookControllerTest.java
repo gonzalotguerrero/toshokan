@@ -23,9 +23,11 @@ import java.util.Set;
 import java.util.UUID;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -179,5 +181,22 @@ class BookControllerTest {
         mockMvc.perform(get("/api/v1/books/search"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detail").value("Search by exactly one of isbn, author or title"));
+    }
+
+    @Test
+    void deletesABook() throws Exception {
+        mockMvc.perform(delete("/api/v1/books/{bookId}", DUNE.bookId()))
+                .andExpect(status().isNoContent());
+
+        verify(service).deleteBook(DUNE.bookId());
+    }
+
+    @Test
+    void answersDeletingABookThatStillHasCopiesWithConflict() throws Exception {
+        doThrow(new ConflictException("Book still has 1 copy that isn't withdrawn"))
+                .when(service).deleteBook(DUNE.bookId());
+
+        mockMvc.perform(delete("/api/v1/books/{bookId}", DUNE.bookId()))
+                .andExpect(status().isConflict());
     }
 }
