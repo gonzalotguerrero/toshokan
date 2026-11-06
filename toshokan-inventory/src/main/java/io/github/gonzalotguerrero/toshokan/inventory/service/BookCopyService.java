@@ -118,6 +118,15 @@ public class BookCopyService {
                 .map(this::details);
     }
 
+    public Optional<BookCopyDetails> findBookCopy(UUID bookId, UUID bookCopyId) {
+        return copies.findById(copyKey(bookId, bookCopyId)).map(this::details);
+    }
+
+    /** Every copy that's lent out right now, to whoever. */
+    public List<BookCopyDetails> findLentCopies() {
+        return copies.findByStatus(BookCopyStatus.LENT).stream().map(this::details).toList();
+    }
+
     /** The copies a member has out right now. */
     public List<BookCopyDetails> findCopiesLentTo(UUID memberId) {
         return copies.findByMemberId(memberId).stream().map(this::details).toList();
@@ -126,15 +135,17 @@ public class BookCopyService {
     /**
      * Lends an AVAILABLE copy to a member. The checks about the member (limits, overdue books) are circulation's
      * job; this only makes sure the copy itself can go out, and that nobody else lends it at the same moment.
+     * Circulation picks the loan id and time, because it records them in the loan history before calling this.
      */
-    public BookCopyDetails markLent(UUID bookId, UUID bookCopyId, UUID memberId, LocalDate dueDate) {
+    public BookCopyDetails markLent(UUID bookId, UUID bookCopyId, UUID memberId, UUID loanId, Instant lentAt,
+                                   LocalDate dueDate) {
         BookDetails book = requireBook(bookId);
         BookCopy copy = requireCopy(bookId, bookCopyId);
         if (copy.status() != BookCopyStatus.AVAILABLE) {
             throw new ConflictException("Book copy " + copy.inventoryNumber() + " can't be lent because it's "
                     + copy.status());
         }
-        BookCopy lent = copy.lentTo(UUID.randomUUID(), memberId, now(), dueDate);
+        BookCopy lent = copy.lentTo(loanId, memberId, lentAt, dueDate);
         writeChange(copy, lent);
         log.info("Lent book copy {} ({}) to member {} until {}", copy.bookCopyId(), copy.inventoryNumber(),
                 memberId, dueDate);
@@ -142,10 +153,17 @@ public class BookCopyService {
         return details(lent);
     }
 
-    /** Puts a lent copy back on the shelf. {@code loanId} is the loan the caller saw, so a stale return fails. */
-    public BookCopyDetails markReturned(UUID bookId, UUID bookCopyId, UUID loanId) {
+    /**
+     * Puts a lent copy back on the shelf. {@code loanId} and {@code renewalsSeen} are the loan the caller saw (and
+     * wrote into the loan history), so if it changed in between, the return fails instead of going through with
+     * details that no longer match.
+     */
+    public BookCopyDetails markReturned(UUID bookId, UUID bookCopyId, UUID loanId, int renewalsSeen) {
         BookDetails book = requireBook(bookId);
         BookCopy copy = requireLoan(bookId, bookCopyId, loanId);
+        if (copy.renewals() != renewalsSeen) {
+            throw changedMeanwhile(copy);
+        }
         BookCopy returned = copy.returned();
         writeChange(copy, returned);
         log.info("Book copy {} ({}) was returned by member {}", copy.bookCopyId(), copy.inventoryNumber(),

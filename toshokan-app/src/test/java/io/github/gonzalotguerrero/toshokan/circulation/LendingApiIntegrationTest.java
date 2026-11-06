@@ -4,6 +4,8 @@ import io.github.gonzalotguerrero.toshokan.TestcontainersConfiguration;
 import io.github.gonzalotguerrero.toshokan.catalog.dto.BookDetails;
 import io.github.gonzalotguerrero.toshokan.catalog.model.Book;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.LoanDetails;
+import io.github.gonzalotguerrero.toshokan.circulation.model.LoanByCopy;
+import io.github.gonzalotguerrero.toshokan.circulation.model.LoanByMember;
 import io.github.gonzalotguerrero.toshokan.circulation.model.MemberLendingLock;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookCopyDetails;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookSummary;
@@ -58,7 +60,8 @@ class LendingApiIntegrationTest {
     @BeforeEach
     void setUp() {
         for (Class<?> table : List.of(Book.class, BookCopy.class, BookCopyByInventoryNumber.class, BookHoldings.class,
-                Member.class, MemberByCardNumber.class, MemberDirectoryEntry.class, MemberLendingLock.class)) {
+                Member.class, MemberByCardNumber.class, MemberDirectoryEntry.class, MemberLendingLock.class,
+                LoanByCopy.class, LoanByMember.class)) {
             cassandra.truncate(table);
         }
         client = RestTestClient.bindToServer().baseUrl("http://localhost:" + port + "/toshokan").build();

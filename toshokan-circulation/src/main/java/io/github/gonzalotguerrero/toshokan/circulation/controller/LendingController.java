@@ -2,6 +2,7 @@ package io.github.gonzalotguerrero.toshokan.circulation.controller;
 
 import io.github.gonzalotguerrero.toshokan.circulation.dto.LendRequest;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.LoanDetails;
+import io.github.gonzalotguerrero.toshokan.circulation.dto.OverdueLoan;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.RenewalRequest;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.ReturnRequest;
 import io.github.gonzalotguerrero.toshokan.circulation.service.LendingService;
@@ -52,5 +53,10 @@ public class LendingController {
     @GetMapping("/members/{memberId}/loans")
     public List<LoanDetails> memberLoans(@PathVariable("memberId") UUID memberId) {
         return service.memberLoans(memberId);
+    }
+
+    @GetMapping("/loans/overdue")
+    public List<OverdueLoan> overdueLoans() {
+        return service.overdueLoans();
     }
 }

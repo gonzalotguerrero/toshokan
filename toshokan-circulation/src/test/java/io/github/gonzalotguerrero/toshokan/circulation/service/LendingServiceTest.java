@@ -1,10 +1,15 @@
 package io.github.gonzalotguerrero.toshokan.circulation.service;
 
+import io.github.gonzalotguerrero.toshokan.catalog.dto.BookDetails;
+import io.github.gonzalotguerrero.toshokan.catalog.service.BookService;
 import io.github.gonzalotguerrero.toshokan.circulation.config.LendingProperties;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.LendRequest;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.LoanDetails;
+import io.github.gonzalotguerrero.toshokan.circulation.dto.OverdueLoan;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.RenewalRequest;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.ReturnRequest;
+import io.github.gonzalotguerrero.toshokan.circulation.model.LoanByCopy;
+import io.github.gonzalotguerrero.toshokan.circulation.repository.LoanHistoryWriter;
 import io.github.gonzalotguerrero.toshokan.circulation.repository.MemberLendingLocks;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookCopyDetails;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookCopyLoan;
@@ -18,6 +23,8 @@ import io.github.gonzalotguerrero.toshokan.shared.exceptions.NotFoundException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -27,6 +34,7 @@ import java.time.LocalDate;
 import java.time.Period;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Set;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -36,6 +44,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -57,16 +66,22 @@ class LendingServiceTest {
     private MemberService members;
 
     @Mock
+    private BookService books;
+
+    @Mock
     private BookCopyService copies;
 
     @Mock
     private MemberLendingLocks locks;
 
+    @Mock
+    private LoanHistoryWriter history;
+
     private LendingService service;
 
     @BeforeEach
     void setUp() {
-        service = new LendingService(members, copies, locks, RULES, CLOCK);
+        service = new LendingService(members, books, copies, locks, history, RULES, CLOCK);
     }
 
     @Test
@@ -74,7 +89,8 @@ class LendingServiceTest {
         givenMemberAndCopy();
         givenTheLockIsFree();
         when(copies.findCopiesLentTo(ANA.memberId())).thenReturn(List.of());
-        when(copies.markLent(ON_SHELF.bookId(), ON_SHELF.bookCopyId(), ANA.memberId(), LocalDate.of(2026, 6, 29)))
+        when(copies.markLent(eq(ON_SHELF.bookId()), eq(ON_SHELF.bookCopyId()), eq(ANA.memberId()), any(),
+                eq(CLOCK.instant()), eq(LocalDate.of(2026, 6, 29))))
                 .thenReturn(lentCopy("LIB-000001", LocalDate.of(2026, 6, 29), 0));
 
         LoanDetails loan = service.lend(new LendRequest(" LIB-000001 ", " CARD-0001 "));
@@ -82,6 +98,27 @@ class LendingServiceTest {
         assertThat(loan.dueDate()).isEqualTo(LocalDate.of(2026, 6, 29));
         assertThat(loan.memberId()).isEqualTo(ANA.memberId());
         verify(locks).whileLocked(eq(ANA.memberId()), any());
+    }
+
+    @Test
+    void recordsTheLoanInTheHistoryBeforeLendingTheCopy() {
+        givenMemberAndCopy();
+        givenTheLockIsFree();
+        when(copies.findCopiesLentTo(ANA.memberId())).thenReturn(List.of());
+        ArgumentCaptor<UUID> loanId = ArgumentCaptor.forClass(UUID.class);
+        when(copies.markLent(any(), any(), any(), loanId.capture(), any(), any()))
+                .thenReturn(lentCopy("LIB-000001", LocalDate.of(2026, 6, 29), 0));
+
+        service.lend(new LendRequest("LIB-000001", "CARD-0001"));
+
+        InOrder order = inOrder(history, copies);
+        ArgumentCaptor<LoanByCopy> saved = ArgumentCaptor.forClass(LoanByCopy.class);
+        order.verify(history).save(saved.capture());
+        order.verify(copies).markLent(any(), any(), any(), any(), any(), any());
+        // The history row and the copy must name the same loan, or the row would be read as a failed lend
+        assertThat(saved.getValue()).isEqualTo(new LoanByCopy(ON_SHELF.bookCopyId(), CLOCK.instant(),
+                loanId.getValue(), ON_SHELF.bookId(), "LIB-000001", ANA.memberId(), LocalDate.of(2026, 6, 29), 0,
+                null));
     }
 
     @Test
@@ -114,7 +151,8 @@ class LendingServiceTest {
         assertThatThrownBy(() -> service.lend(new LendRequest("LIB-000001", "CARD-0001")))
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("Member CARD-0001 is inactive and can't borrow books");
-        verify(copies, never()).markLent(any(), any(), any(), any());
+        verify(copies, never()).markLent(any(), any(), any(), any(), any(), any());
+        verifyNoInteractions(history);
     }
 
     @Test
@@ -127,7 +165,8 @@ class LendingServiceTest {
         assertThatThrownBy(() -> service.lend(new LendRequest("LIB-000001", "CARD-0001")))
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("Member CARD-0001 has an overdue book (LIB-000007) and can't borrow more until it's returned");
-        verify(copies, never()).markLent(any(), any(), any(), any());
+        verify(copies, never()).markLent(any(), any(), any(), any(), any(), any());
+        verifyNoInteractions(history);
     }
 
     @Test
@@ -142,7 +181,8 @@ class LendingServiceTest {
         assertThatThrownBy(() -> service.lend(new LendRequest("LIB-000001", "CARD-0001")))
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("Member CARD-0001 already has 3 books out, which is the most allowed");
-        verify(copies, never()).markLent(any(), any(), any(), any());
+        verify(copies, never()).markLent(any(), any(), any(), any(), any(), any());
+        verifyNoInteractions(history);
     }
 
     @Test
@@ -153,7 +193,21 @@ class LendingServiceTest {
         service.returnCopy(new ReturnRequest("LIB-000001"));
 
         // Overdue or not, the book can always come back
-        verify(copies).markReturned(lent.bookId(), lent.bookCopyId(), lent.loan().loanId());
+        verify(copies).markReturned(lent.bookId(), lent.bookCopyId(), lent.loan().loanId(), 0);
+    }
+
+    @Test
+    void recordsTheReturnInTheHistoryBeforeReturningTheCopy() {
+        BookCopyDetails lent = lentCopy("LIB-000001", TODAY.plusDays(4), 1);
+        when(copies.findBookCopyByInventoryNumber("LIB-000001")).thenReturn(Optional.of(lent));
+
+        service.returnCopy(new ReturnRequest("LIB-000001"));
+
+        InOrder order = inOrder(history, copies);
+        BookCopyLoan loan = lent.loan();
+        order.verify(history).save(new LoanByCopy(lent.bookCopyId(), loan.lentAt(), loan.loanId(), lent.bookId(),
+                "LIB-000001", ANA.memberId(), TODAY.plusDays(4), 1, CLOCK.instant()));
+        order.verify(copies).markReturned(lent.bookId(), lent.bookCopyId(), loan.loanId(), 1);
     }
 
     @Test
@@ -163,6 +217,7 @@ class LendingServiceTest {
         assertThatThrownBy(() -> service.returnCopy(new ReturnRequest("LIB-000001")))
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("Book copy LIB-000001 isn't lent out");
+        verifyNoInteractions(history);
     }
 
     @Test
@@ -221,6 +276,44 @@ class LendingServiceTest {
         verifyNoInteractions(copies);
     }
 
+    @Test
+    void listsOverdueLoansMostOverdueFirstWithTheMembersContactDetails() {
+        BookCopyDetails slightlyLate = lentCopy("LIB-000002", TODAY.minusDays(2), 0);
+        BookCopyDetails veryLate = lentCopy("LIB-000003", TODAY.minusDays(10), 1);
+        BookCopyDetails dueToday = lentCopy("LIB-000004", TODAY, 0);
+        when(copies.findLentCopies()).thenReturn(List.of(slightlyLate, veryLate, dueToday));
+        when(books.findBook(any())).thenAnswer(call -> Optional.of(book(call.getArgument(0), "Kokoro")));
+        when(members.findMember(ANA.memberId())).thenReturn(Optional.of(ANA));
+
+        List<OverdueLoan> overdue = service.overdueLoans();
+
+        // Due today isn't late yet
+        assertThat(overdue).extracting(OverdueLoan::inventoryNumber).containsExactly("LIB-000003", "LIB-000002");
+        assertThat(overdue).extracting(OverdueLoan::daysOverdue).containsExactly(10L, 2L);
+        OverdueLoan first = overdue.getFirst();
+        assertThat(first.title()).isEqualTo("Kokoro");
+        assertThat(first.cardNumber()).isEqualTo("CARD-0001");
+        assertThat(first.fullName()).isEqualTo("Ana Pérez");
+        assertThat(first.email()).isEqualTo("ana@example.com");
+        assertThat(first.loanId()).isEqualTo(veryLate.loan().loanId());
+        // Ana has both late books, but is only looked up once
+        verify(members).findMember(ANA.memberId());
+    }
+
+    @Test
+    void anOverdueLoanStaysOnTheListEvenIfItsBookOrMemberCantBeFound() {
+        when(copies.findLentCopies()).thenReturn(List.of(lentCopy("LIB-000002", TODAY.minusDays(3), 0)));
+        when(books.findBook(any())).thenReturn(Optional.empty());
+        when(members.findMember(ANA.memberId())).thenReturn(Optional.empty());
+
+        assertThat(service.overdueLoans()).singleElement().satisfies(loan -> {
+            assertThat(loan.inventoryNumber()).isEqualTo("LIB-000002");
+            assertThat(loan.title()).isNull();
+            assertThat(loan.cardNumber()).isNull();
+            assertThat(loan.daysOverdue()).isEqualTo(3);
+        });
+    }
+
     private void givenMemberAndCopy() {
         when(members.findMemberByCardNumber("CARD-0001")).thenReturn(Optional.of(ANA));
         when(copies.findBookCopyByInventoryNumber("LIB-000001")).thenReturn(Optional.of(ON_SHELF));
@@ -236,6 +329,11 @@ class LendingServiceTest {
     private static MemberDetails withStatus(MemberStatus status) {
         return new MemberDetails(ANA.memberId(), ANA.cardNumber(), ANA.fullName(), ANA.email(), ANA.phone(), status,
                 ANA.joinedAt());
+    }
+
+    private static BookDetails book(UUID bookId, String title) {
+        return new BookDetails(bookId, "9780000000000", title, List.of("Natsume Sōseki"), "Iwanami", 1914, "ja",
+                Set.of("Novel"), Instant.parse("2026-01-01T09:00:00Z"));
     }
 
     private static BookCopyDetails lentCopy(String inventoryNumber, LocalDate dueDate, int renewals) {

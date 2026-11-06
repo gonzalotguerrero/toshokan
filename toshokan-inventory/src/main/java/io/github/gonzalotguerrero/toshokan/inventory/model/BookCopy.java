@@ -16,10 +16,13 @@ import java.util.UUID;
  *
  * <p>While a copy is LENT, the row also says who has it, since when and until when. Those columns are set and
  * cleared by the same conditional write that changes the status, so a copy can never be LENT without a loan, or
- * have a loan while it's on the shelf. There's no separate loans table that could disagree with it.
+ * have a loan while it's on the shelf. Circulation keeps a loan history too, but it's only a record: when the
+ * history and this row disagree about which loan is active, this row wins.
  *
- * <p>{@code member_id} has a secondary index, which is how we find everything one member has out. Cassandra
- * updates the index together with the row, so it can't fall behind either.
+ * <p>{@code member_id} and {@code status} have secondary indexes, which is how we find everything one member has
+ * out, and every copy that's lent out (for the overdue list). Cassandra updates an index together with its row,
+ * so they can't fall behind either. An index on a column with so few values would be a poor fit for a big cluster,
+ * but one library's copies are a small table.
  */
 @Table("book_copies_by_book")
 public record BookCopy(
@@ -30,7 +33,7 @@ public record BookCopy(
         UUID bookCopyId,
 
         @Column("inventory_number") String inventoryNumber,
-        @Column("status") BookCopyStatus status,
+        @Indexed("book_copies_by_book_status_idx") @Column("status") BookCopyStatus status,
         @Column("added_at") Instant addedAt,
 
         // Everything below describes the current loan, and is null unless the copy is LENT

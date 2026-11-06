@@ -2,6 +2,7 @@ package io.github.gonzalotguerrero.toshokan.circulation.controller;
 
 import io.github.gonzalotguerrero.toshokan.circulation.dto.LendRequest;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.LoanDetails;
+import io.github.gonzalotguerrero.toshokan.circulation.dto.OverdueLoan;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.RenewalRequest;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.ReturnRequest;
 import io.github.gonzalotguerrero.toshokan.circulation.service.LendingService;
@@ -118,5 +119,19 @@ class LendingControllerTest {
         mockMvc.perform(get("/api/v1/members/{memberId}/loans", LOAN.memberId()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].inventoryNumber").value("LIB-000001"));
+    }
+
+    @Test
+    void listsOverdueLoans() throws Exception {
+        when(service.overdueLoans()).thenReturn(List.of(new OverdueLoan(UUID.randomUUID(), UUID.randomUUID(),
+                UUID.randomUUID(), "LIB-000001", "Kokoro", UUID.randomUUID(), "CARD-0001", "Ana Pérez",
+                "ana@example.com", "+81 3 1234 5678", LocalDate.of(2026, 6, 10), 5)));
+
+        mockMvc.perform(get("/api/v1/loans/overdue"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].title").value("Kokoro"))
+                .andExpect(jsonPath("$[0].email").value("ana@example.com"))
+                .andExpect(jsonPath("$[0].dueDate").value("2026-06-10"))
+                .andExpect(jsonPath("$[0].daysOverdue").value(5));
     }
 }

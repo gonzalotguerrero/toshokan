@@ -276,14 +276,19 @@ class BookCopyServiceTest {
         givenExistingCopy(copy);
         when(statusChanges.replace(eq(copy), any())).thenReturn(true);
         UUID memberId = UUID.randomUUID();
+        UUID loanId = UUID.randomUUID();
+        Instant lentAt = Instant.parse("2026-06-15T12:00:00Z");
 
-        BookCopyDetails lent = service.markLent(DUNE.bookId(), copy.bookCopyId(), memberId, TODAY.plusDays(14));
+        BookCopyDetails lent = service.markLent(DUNE.bookId(), copy.bookCopyId(), memberId, loanId, lentAt,
+                TODAY.plusDays(14));
 
         ArgumentCaptor<BookCopy> written = ArgumentCaptor.forClass(BookCopy.class);
         verify(statusChanges).replace(eq(copy), written.capture());
         assertThat(written.getValue().status()).isEqualTo(BookCopyStatus.LENT);
         assertThat(written.getValue().memberId()).isEqualTo(memberId);
-        assertThat(written.getValue().lentAt()).isEqualTo(Instant.parse("2026-06-15T12:00:00Z"));
+        // The loan id and time are the ones circulation already wrote into the loan history
+        assertThat(written.getValue().loanId()).isEqualTo(loanId);
+        assertThat(written.getValue().lentAt()).isEqualTo(lentAt);
         assertThat(written.getValue().renewals()).isZero();
         assertThat(lent.loan().dueDate()).isEqualTo(LocalDate.of(2026, 6, 29));
         assertThat(lent.loan().overdue()).isFalse();
@@ -295,7 +300,8 @@ class BookCopyServiceTest {
         BookCopy copy = copy("LIB-000001", BookCopyStatus.DAMAGED);
         givenExistingCopy(copy);
 
-        assertThatThrownBy(() -> service.markLent(DUNE.bookId(), copy.bookCopyId(), UUID.randomUUID(), TODAY))
+        assertThatThrownBy(() -> service.markLent(DUNE.bookId(), copy.bookCopyId(), UUID.randomUUID(), UUID.randomUUID(),
+                Instant.now(), TODAY))
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("Book copy LIB-000001 can't be lent because it's DAMAGED");
         verifyNoInteractions(statusChanges, holdingsRefresher);
@@ -307,7 +313,8 @@ class BookCopyServiceTest {
         givenExistingCopy(copy);
         when(statusChanges.replace(eq(copy), any())).thenReturn(false);
 
-        assertThatThrownBy(() -> service.markLent(DUNE.bookId(), copy.bookCopyId(), UUID.randomUUID(), TODAY))
+        assertThatThrownBy(() -> service.markLent(DUNE.bookId(), copy.bookCopyId(), UUID.randomUUID(), UUID.randomUUID(),
+                Instant.now(), TODAY))
                 .isInstanceOf(ConflictException.class)
                 .hasMessageContaining("was changed by someone else at the same time");
         verifyNoInteractions(holdingsRefresher);
@@ -319,7 +326,7 @@ class BookCopyServiceTest {
         givenExistingCopy(lent);
         when(statusChanges.replace(lent, lent.returned())).thenReturn(true);
 
-        BookCopyDetails returned = service.markReturned(DUNE.bookId(), lent.bookCopyId(), lent.loanId());
+        BookCopyDetails returned = service.markReturned(DUNE.bookId(), lent.bookCopyId(), lent.loanId(), 0);
 
         assertThat(returned.status()).isEqualTo(BookCopyStatus.AVAILABLE);
         assertThat(returned.loan()).isNull();
@@ -331,9 +338,39 @@ class BookCopyServiceTest {
         BookCopy lent = lentCopy(TODAY.plusDays(3), 0);
         givenExistingCopy(lent);
 
-        assertThatThrownBy(() -> service.markReturned(DUNE.bookId(), lent.bookCopyId(), UUID.randomUUID()))
+        assertThatThrownBy(() -> service.markReturned(DUNE.bookId(), lent.bookCopyId(), UUID.randomUUID(), 0))
                 .isInstanceOf(ConflictException.class);
         verifyNoInteractions(statusChanges);
+    }
+
+    @Test
+    void refusesAReturnIfTheLoanWasRenewedInTheMeantime() {
+        BookCopy lent = lentCopy(TODAY.plusDays(3), 1);
+        givenExistingCopy(lent);
+
+        assertThatThrownBy(() -> service.markReturned(DUNE.bookId(), lent.bookCopyId(), lent.loanId(), 0))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("was changed by someone else at the same time");
+        verifyNoInteractions(statusChanges);
+    }
+
+    @Test
+    void findsACopyById() {
+        BookCopy lent = lentCopy(TODAY.plusDays(3), 0);
+        givenStoredCopy(lent);
+
+        assertThat(service.findBookCopy(DUNE.bookId(), lent.bookCopyId())).contains(BookCopyDetails.from(lent, TODAY));
+    }
+
+    @Test
+    void findsEveryLentCopyThroughTheStatus() {
+        BookCopy first = lentCopy(TODAY.plusDays(3), 0);
+        BookCopy second = lentCopy(TODAY.minusDays(2), 0);
+        when(copies.findByStatus(BookCopyStatus.LENT)).thenReturn(List.of(first, second));
+
+        assertThat(service.findLentCopies())
+                .extracting(copy -> copy.loan().overdue())
+                .containsExactly(false, true);
     }
 
     @Test
