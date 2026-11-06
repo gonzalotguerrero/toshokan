@@ -46,6 +46,8 @@
         <java.version>21</java.version>
         <!-- Only toshokan-app can be run, so it sets this back to false -->
         <spring-boot.run.skip>true</spring-boot.run.skip>
+        <!-- The 3.x line is the one for Spring Boot 4; 3.2.0 is built against Boot 4.1.2 -->
+        <springdoc.version>3.2.0</springdoc.version>
     </properties>
 
     <dependencyManagement>
@@ -74,6 +76,11 @@
                 <groupId>io.github.gonzalotguerrero</groupId>
                 <artifactId>toshokan-circulation</artifactId>
                 <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+                <version>${springdoc.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
