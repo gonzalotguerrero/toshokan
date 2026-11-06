@@ -6,21 +6,26 @@ import io.github.gonzalotguerrero.toshokan.inventory.dto.AddBookCopyRequest;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookCopyDetails;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopy;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopyStatus;
+import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopyByInventoryNumber;
+import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyByInventoryNumberRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyStatusChanges;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.InventoryNumberClaims;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.NewBookCopyInserter;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.ConflictException;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.NotFoundException;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.cassandra.core.mapping.BasicMapId;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -40,6 +45,12 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class BookCopyServiceTest {
 
+    // Noon on June 15th in the library's zone, so "today" is the same date whatever the machine's zone is
+    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-06-15T12:00:00Z"), ZoneOffset.UTC);
+    private static final LocalDate TODAY = LocalDate.of(2026, 6, 15);
+
+    private static final UUID MEMBER_ID = UUID.randomUUID();
+
     private static final BookDetails DUNE = new BookDetails(UUID.randomUUID(), null, "Dune",
             List.of("Frank Herbert"), null, 1965, "English", Set.of("Science fiction"), Instant.now());
 
@@ -48,6 +59,9 @@ class BookCopyServiceTest {
 
     @Mock
     private BookCopyRepository copies;
+
+    @Mock
+    private BookCopyByInventoryNumberRepository copiesByInventoryNumber;
 
     @Mock
     private InventoryNumberClaims inventoryNumbers;
@@ -61,8 +75,13 @@ class BookCopyServiceTest {
     @Mock
     private BookHoldingsRefresher holdingsRefresher;
 
-    @InjectMocks
     private BookCopyService service;
+
+    @BeforeEach
+    void setUp() {
+        service = new BookCopyService(books, copies, copiesByInventoryNumber, inventoryNumbers, newCopies,
+                statusChanges, holdingsRefresher, CLOCK);
+    }
 
     @Test
     void addsAnAvailableCopyAndRefreshesTheHoldings() {
@@ -76,7 +95,7 @@ class BookCopyServiceTest {
         assertThat(saved.getValue().bookId()).isEqualTo(DUNE.bookId());
         assertThat(saved.getValue().inventoryNumber()).isEqualTo("LIB-000123");
         assertThat(saved.getValue().status()).isEqualTo(BookCopyStatus.AVAILABLE);
-        assertThat(added).isEqualTo(BookCopyDetails.from(saved.getValue()));
+        assertThat(added).isEqualTo(BookCopyDetails.from(saved.getValue(), TODAY));
         verify(inventoryNumbers).claim("LIB-000123", DUNE.bookId(), added.bookCopyId());
         verify(holdingsRefresher).refresh(DUNE);
     }
@@ -136,7 +155,7 @@ class BookCopyServiceTest {
         when(copies.findByBookId(DUNE.bookId())).thenReturn(List.of(second, first));
 
         assertThat(service.listBookCopies(DUNE.bookId()))
-                .containsExactly(BookCopyDetails.from(first), BookCopyDetails.from(second));
+                .containsExactly(BookCopyDetails.from(first, TODAY), BookCopyDetails.from(second, TODAY));
     }
 
     @Test
@@ -168,7 +187,7 @@ class BookCopyServiceTest {
 
         BookCopyDetails unchanged = service.changeStatus(DUNE.bookId(), copy.bookCopyId(), BookCopyStatus.DAMAGED);
 
-        assertThat(unchanged).isEqualTo(BookCopyDetails.from(copy));
+        assertThat(unchanged).isEqualTo(BookCopyDetails.from(copy, TODAY));
         verifyNoInteractions(statusChanges, holdingsRefresher);
     }
 
@@ -240,13 +259,136 @@ class BookCopyServiceTest {
         verifyNoInteractions(statusChanges, holdingsRefresher);
     }
 
+    @Test
+    void findsACopyByItsInventoryNumber() {
+        BookCopy copy = copy("LIB-000001", BookCopyStatus.AVAILABLE);
+        when(copiesByInventoryNumber.findById("LIB-000001"))
+                .thenReturn(Optional.of(new BookCopyByInventoryNumber("LIB-000001", DUNE.bookId(), copy.bookCopyId())));
+        when(copies.findById(BasicMapId.id("bookId", DUNE.bookId()).with("bookCopyId", copy.bookCopyId())))
+                .thenReturn(Optional.of(copy));
+
+        assertThat(service.findBookCopyByInventoryNumber(" LIB-000001 ")).contains(BookCopyDetails.from(copy, TODAY));
+    }
+
+    @Test
+    void lendingAnAvailableCopyRecordsTheLoanOnIt() {
+        BookCopy copy = copy("LIB-000001", BookCopyStatus.AVAILABLE);
+        givenExistingCopy(copy);
+        when(statusChanges.replace(eq(copy), any())).thenReturn(true);
+        UUID memberId = UUID.randomUUID();
+
+        BookCopyDetails lent = service.markLent(DUNE.bookId(), copy.bookCopyId(), memberId, TODAY.plusDays(14));
+
+        ArgumentCaptor<BookCopy> written = ArgumentCaptor.forClass(BookCopy.class);
+        verify(statusChanges).replace(eq(copy), written.capture());
+        assertThat(written.getValue().status()).isEqualTo(BookCopyStatus.LENT);
+        assertThat(written.getValue().memberId()).isEqualTo(memberId);
+        assertThat(written.getValue().lentAt()).isEqualTo(Instant.parse("2026-06-15T12:00:00Z"));
+        assertThat(written.getValue().renewals()).isZero();
+        assertThat(lent.loan().dueDate()).isEqualTo(LocalDate.of(2026, 6, 29));
+        assertThat(lent.loan().overdue()).isFalse();
+        verify(holdingsRefresher).refresh(DUNE);
+    }
+
+    @Test
+    void refusesToLendACopyThatIsNotAvailable() {
+        BookCopy copy = copy("LIB-000001", BookCopyStatus.DAMAGED);
+        givenExistingCopy(copy);
+
+        assertThatThrownBy(() -> service.markLent(DUNE.bookId(), copy.bookCopyId(), UUID.randomUUID(), TODAY))
+                .isInstanceOf(ConflictException.class)
+                .hasMessage("Book copy LIB-000001 can't be lent because it's DAMAGED");
+        verifyNoInteractions(statusChanges, holdingsRefresher);
+    }
+
+    @Test
+    void reportsAConflictWhenTheCopyIsLentBySomeoneElseAtTheSameTime() {
+        BookCopy copy = copy("LIB-000001", BookCopyStatus.AVAILABLE);
+        givenExistingCopy(copy);
+        when(statusChanges.replace(eq(copy), any())).thenReturn(false);
+
+        assertThatThrownBy(() -> service.markLent(DUNE.bookId(), copy.bookCopyId(), UUID.randomUUID(), TODAY))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("was changed by someone else at the same time");
+        verifyNoInteractions(holdingsRefresher);
+    }
+
+    @Test
+    void returningClearsTheLoan() {
+        BookCopy lent = lentCopy(TODAY.plusDays(3), 0);
+        givenExistingCopy(lent);
+        when(statusChanges.replace(lent, lent.returned())).thenReturn(true);
+
+        BookCopyDetails returned = service.markReturned(DUNE.bookId(), lent.bookCopyId(), lent.loanId());
+
+        assertThat(returned.status()).isEqualTo(BookCopyStatus.AVAILABLE);
+        assertThat(returned.loan()).isNull();
+        verify(holdingsRefresher).refresh(DUNE);
+    }
+
+    @Test
+    void refusesAReturnForALoanThatIsNoLongerThere() {
+        BookCopy lent = lentCopy(TODAY.plusDays(3), 0);
+        givenExistingCopy(lent);
+
+        assertThatThrownBy(() -> service.markReturned(DUNE.bookId(), lent.bookCopyId(), UUID.randomUUID()))
+                .isInstanceOf(ConflictException.class);
+        verifyNoInteractions(statusChanges);
+    }
+
+    @Test
+    void extendingALoanMovesTheDueDateAndCountsTheRenewal() {
+        BookCopy lent = lentCopy(TODAY.plusDays(3), 1);
+        givenStoredCopy(lent);
+        when(statusChanges.replace(lent, lent.renewedUntil(TODAY.plusDays(14)))).thenReturn(true);
+
+        BookCopyDetails renewed = service.extendLoan(DUNE.bookId(), lent.bookCopyId(), lent.loanId(), 1,
+                TODAY.plusDays(14));
+
+        assertThat(renewed.loan().dueDate()).isEqualTo(TODAY.plusDays(14));
+        assertThat(renewed.loan().renewals()).isEqualTo(2);
+    }
+
+    @Test
+    void refusesToExtendALoanThatWasRenewedInTheMeantime() {
+        BookCopy lent = lentCopy(TODAY.plusDays(3), 1);
+        givenStoredCopy(lent);
+
+        assertThatThrownBy(() -> service.extendLoan(DUNE.bookId(), lent.bookCopyId(), lent.loanId(), 0,
+                TODAY.plusDays(14)))
+                .isInstanceOf(ConflictException.class);
+        verifyNoInteractions(statusChanges);
+    }
+
+    @Test
+    void aLoanIsOverdueFromTheDayAfterItsDueDate() {
+        BookCopy dueToday = lentCopy(TODAY, 0);
+        BookCopy dueYesterday = lentCopy(TODAY.minusDays(1), 0);
+        when(copies.findByMemberId(dueToday.memberId())).thenReturn(List.of(dueToday, dueYesterday));
+
+        assertThat(service.findCopiesLentTo(dueToday.memberId()))
+                .extracting(copy -> copy.loan().overdue())
+                .containsExactly(false, true);
+    }
+
+    private static BookCopy lentCopy(LocalDate dueDate, int renewals) {
+        return new BookCopy(DUNE.bookId(), UUID.randomUUID(), "LIB-000001", BookCopyStatus.LENT, Instant.now(),
+                UUID.randomUUID(), MEMBER_ID, Instant.parse("2026-06-01T10:00:00Z"), dueDate, renewals);
+    }
+
     private void givenExistingCopy(BookCopy copy) {
         when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
+        givenStoredCopy(copy);
+    }
+
+    /** Only the copy, for operations that never look at the book itself. */
+    private void givenStoredCopy(BookCopy copy) {
         when(copies.findById(BasicMapId.id("bookId", DUNE.bookId()).with("bookCopyId", copy.bookCopyId())))
                 .thenReturn(Optional.of(copy));
     }
 
     private static BookCopy copy(String inventoryNumber, BookCopyStatus status) {
-        return new BookCopy(DUNE.bookId(), UUID.randomUUID(), inventoryNumber, status, Instant.now());
+        return new BookCopy(DUNE.bookId(), UUID.randomUUID(), inventoryNumber, status, Instant.now(),
+                null, null, null, null, null);
     }
 }

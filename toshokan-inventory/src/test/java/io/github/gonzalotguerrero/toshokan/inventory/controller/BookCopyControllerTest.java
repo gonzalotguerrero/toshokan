@@ -53,7 +53,7 @@ class BookCopyControllerTest {
     @Test
     void addsACopy() throws Exception {
         BookCopyDetails copy = new BookCopyDetails(UUID.randomUUID(), BOOK_ID, "LIB-000123", BookCopyStatus.AVAILABLE,
-                Instant.parse("2026-06-15T10:00:00Z"));
+                Instant.parse("2026-06-15T10:00:00Z"), null);
         when(service.addBookCopy(BOOK_ID, new AddBookCopyRequest("LIB-000123"))).thenReturn(copy);
 
         mockMvc.perform(post("/api/v1/books/{bookId}/copies", BOOK_ID)
@@ -172,6 +172,6 @@ class BookCopyControllerTest {
 
     private static BookCopyDetails copyWithStatus(BookCopyStatus status) {
         return new BookCopyDetails(UUID.randomUUID(), BOOK_ID, "LIB-000123", status,
-                Instant.parse("2026-06-15T10:00:00Z"));
+                Instant.parse("2026-06-15T10:00:00Z"), null);
     }
 }

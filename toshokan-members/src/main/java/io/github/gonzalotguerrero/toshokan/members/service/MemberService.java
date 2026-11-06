@@ -28,7 +28,6 @@ import org.springframework.stereotype.Service;
 import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
@@ -54,15 +53,17 @@ public class MemberService {
     private final CardNumberClaims cardNumberClaims;
     private final MemberDirectoryRepository directory;
     private final MemberWriter writer;
+    private final MemberDeactivationGuard deactivationGuard;
 
     public MemberService(MemberRepository members, MemberByCardNumberRepository cardNumbers,
                          CardNumberClaims cardNumberClaims, MemberDirectoryRepository directory,
-                         MemberWriter writer) {
+                         MemberWriter writer, MemberDeactivationGuard deactivationGuard) {
         this.members = members;
         this.cardNumbers = cardNumbers;
         this.cardNumberClaims = cardNumberClaims;
         this.directory = directory;
         this.writer = writer;
+        this.deactivationGuard = deactivationGuard;
     }
 
     /** Signs up a new member. They start out ACTIVE, so they can borrow right away. */
@@ -103,6 +104,11 @@ public class MemberService {
         return members.findById(memberId).map(MemberDetails::from);
     }
 
+    /** Used by circulation to find the member behind the card they hand over at the desk. */
+    public Optional<MemberDetails> findMemberByCardNumber(String cardNumber) {
+        return cardNumbers.findById(cardNumber.strip()).flatMap(byCard -> findMember(byCard.memberId()));
+    }
+
     /**
      * Lists members sorted by name, one page at a time. With a card number, it looks that one member up instead
      * and the page has either one item or none.
@@ -114,11 +120,7 @@ public class MemberService {
     public PageResponse<MemberDetails> listMembers(String cardNumber, int pageSize, String pageToken) {
         if (cardNumber != null && !cardNumber.isBlank()) {
             log.debug("Looking up member by card number {}", cardNumber.strip());
-            List<MemberDetails> found = cardNumbers.findById(cardNumber.strip())
-                    .flatMap(byCard -> findMember(byCard.memberId()))
-                    .stream()
-                    .toList();
-            return new PageResponse<>(found, null);
+            return new PageResponse<>(findMemberByCardNumber(cardNumber).stream().toList(), null);
         }
 
         log.debug("Listing members (pageSize={}, firstPage={})", pageSize, pageToken == null);
@@ -159,14 +161,20 @@ public class MemberService {
         if (updated.equals(current)) {
             return MemberDetails.from(current);
         }
-        writer.save(current, updated);
+        if (current.status() == MemberStatus.ACTIVE && status == MemberStatus.INACTIVE) {
+            // Setting the status to INACTIVE is a deactivation too, so it gets the same loan checks as DELETE
+            deactivationGuard.runGuarded(memberId, () -> writer.save(current, updated));
+        } else {
+            writer.save(current, updated);
+        }
         log.info("Updated member {}", memberId);
         return MemberDetails.from(updated);
     }
 
     /**
      * This is what deleting a member means here: they're marked INACTIVE and can't borrow anymore, but the record
-     * stays. Deactivating someone who's already inactive does nothing.
+     * stays. It's refused while they still have books out. Deactivating someone who's already inactive does
+     * nothing.
      */
     public void deactivateMember(UUID memberId) {
         Member current = requireMember(memberId);
@@ -174,7 +182,7 @@ public class MemberService {
             return;
         }
         Member updated = current.withStatus(MemberStatus.INACTIVE);
-        writer.save(current, updated);
+        deactivationGuard.runGuarded(memberId, () -> writer.save(current, updated));
         log.info("Deactivated member {}", memberId);
     }
 

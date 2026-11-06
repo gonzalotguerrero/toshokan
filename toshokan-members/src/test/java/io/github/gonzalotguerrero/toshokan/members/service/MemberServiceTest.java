@@ -32,6 +32,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -58,6 +59,9 @@ class MemberServiceTest {
 
     @Mock
     private MemberWriter writer;
+
+    @Mock
+    private MemberDeactivationGuard deactivationGuard;
 
     @InjectMocks
     private MemberService service;
@@ -262,10 +266,49 @@ class MemberServiceTest {
     @Test
     void deactivatingMarksTheMemberAsInactive() {
         when(members.findById(ANA.memberId())).thenReturn(Optional.of(ANA));
+        guardAllowsDeactivation();
 
         service.deactivateMember(ANA.memberId());
 
         verify(writer).save(ANA, ANA.withStatus(MemberStatus.INACTIVE));
+    }
+
+    @Test
+    void doesNotDeactivateAMemberTheGuardRefuses() {
+        when(members.findById(ANA.memberId())).thenReturn(Optional.of(ANA));
+        doThrow(new ConflictException("Member still has 1 book out"))
+                .when(deactivationGuard).runGuarded(eq(ANA.memberId()), any());
+
+        assertThatThrownBy(() -> service.deactivateMember(ANA.memberId())).isInstanceOf(ConflictException.class);
+        verifyNoInteractions(writer);
+    }
+
+    @Test
+    void settingTheStatusToInactiveGoesThroughTheGuardToo() {
+        when(members.findById(ANA.memberId())).thenReturn(Optional.of(ANA));
+        guardAllowsDeactivation();
+
+        service.updateMember(ANA.memberId(), new UpdateMemberRequest(null, null, null, MemberStatus.INACTIVE));
+
+        verify(deactivationGuard).runGuarded(eq(ANA.memberId()), any());
+        verify(writer).save(ANA, ANA.withStatus(MemberStatus.INACTIVE));
+    }
+
+    @Test
+    void contactChangesDoNotNeedTheGuard() {
+        when(members.findById(ANA.memberId())).thenReturn(Optional.of(ANA));
+
+        service.updateMember(ANA.memberId(), new UpdateMemberRequest(null, null, "555-1234", null));
+
+        verifyNoInteractions(deactivationGuard);
+    }
+
+    /** Makes the guard behave like it does when the member has no books out: it just runs the deactivation. */
+    private void guardAllowsDeactivation() {
+        doAnswer(call -> {
+            call.<Runnable>getArgument(1).run();
+            return null;
+        }).when(deactivationGuard).runGuarded(eq(ANA.memberId()), any());
     }
 
     @Test

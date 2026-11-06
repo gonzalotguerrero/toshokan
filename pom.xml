@@ -38,6 +38,7 @@
         <module>toshokan-catalog</module>
         <module>toshokan-inventory</module>
         <module>toshokan-members</module>
+        <module>toshokan-circulation</module>
         <module>toshokan-app</module>
     </modules>
 
@@ -67,6 +68,11 @@
             <dependency>
                 <groupId>io.github.gonzalotguerrero</groupId>
                 <artifactId>toshokan-members</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.gonzalotguerrero</groupId>
+                <artifactId>toshokan-circulation</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

@@ -6,6 +6,7 @@ import io.github.gonzalotguerrero.toshokan.inventory.dto.AddBookCopyRequest;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookCopyDetails;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopy;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopyStatus;
+import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyByInventoryNumberRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyStatusChanges;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.InventoryNumberClaims;
@@ -15,12 +16,16 @@ import io.github.gonzalotguerrero.toshokan.shared.exceptions.NotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.cassandra.core.mapping.BasicMapId;
+import org.springframework.data.cassandra.core.mapping.MapId;
 import org.springframework.stereotype.Service;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -30,20 +35,25 @@ public class BookCopyService {
 
     private final BookService books;
     private final BookCopyRepository copies;
+    private final BookCopyByInventoryNumberRepository copiesByInventoryNumber;
     private final InventoryNumberClaims inventoryNumbers;
     private final NewBookCopyInserter newCopies;
     private final BookCopyStatusChanges statusChanges;
     private final BookHoldingsRefresher holdingsRefresher;
+    private final Clock clock;
 
-    public BookCopyService(BookService books, BookCopyRepository copies, InventoryNumberClaims inventoryNumbers,
-                           NewBookCopyInserter newCopies, BookCopyStatusChanges statusChanges,
-                           BookHoldingsRefresher holdingsRefresher) {
+    public BookCopyService(BookService books, BookCopyRepository copies,
+                           BookCopyByInventoryNumberRepository copiesByInventoryNumber,
+                           InventoryNumberClaims inventoryNumbers, NewBookCopyInserter newCopies,
+                           BookCopyStatusChanges statusChanges, BookHoldingsRefresher holdingsRefresher, Clock clock) {
         this.books = books;
         this.copies = copies;
+        this.copiesByInventoryNumber = copiesByInventoryNumber;
         this.inventoryNumbers = inventoryNumbers;
         this.newCopies = newCopies;
         this.statusChanges = statusChanges;
         this.holdingsRefresher = holdingsRefresher;
+        this.clock = clock;
     }
 
     /**
@@ -53,8 +63,7 @@ public class BookCopyService {
     public BookCopyDetails addBookCopy(UUID bookId, AddBookCopyRequest request) {
         BookDetails book = requireBook(bookId);
         String inventoryNumber = request.inventoryNumber().strip();
-        BookCopy copy = new BookCopy(bookId, UUID.randomUUID(), inventoryNumber, BookCopyStatus.AVAILABLE,
-                Instant.now().truncatedTo(ChronoUnit.MILLIS));
+        BookCopy copy = BookCopy.newCopy(bookId, UUID.randomUUID(), inventoryNumber, now());
 
         if (!inventoryNumbers.claim(inventoryNumber, bookId, copy.bookCopyId())) {
             throw new ConflictException("Inventory number " + inventoryNumber + " is already in use");
@@ -67,14 +76,14 @@ public class BookCopyService {
         }
         log.info("Added copy {} ({}) of book {}", copy.bookCopyId(), inventoryNumber, bookId);
         refreshHoldings(book, copy);
-        return BookCopyDetails.from(copy);
+        return details(copy);
     }
 
     /** Every copy of a book, withdrawn ones included, sorted by inventory number. */
     public List<BookCopyDetails> listBookCopies(UUID bookId) {
         requireBook(bookId);
         return copies.findByBookId(bookId).stream()
-                .map(BookCopyDetails::from)
+                .map(this::details)
                 .sorted(Comparator.comparing(BookCopyDetails::inventoryNumber))
                 .toList();
     }
@@ -89,7 +98,7 @@ public class BookCopyService {
         }
         BookDetails book = requireBook(bookId);
         BookCopy copy = requireCopy(bookId, bookCopyId);
-        return BookCopyDetails.from(applyStatus(book, copy, newStatus));
+        return details(applyStatus(book, copy, newStatus));
     }
 
     /**
@@ -102,6 +111,67 @@ public class BookCopyService {
         applyStatus(book, copy, BookCopyStatus.WITHDRAWN);
     }
 
+    /** Used by circulation to find the copy behind the number on a book's label. */
+    public Optional<BookCopyDetails> findBookCopyByInventoryNumber(String inventoryNumber) {
+        return copiesByInventoryNumber.findById(inventoryNumber.strip())
+                .flatMap(byNumber -> copies.findById(copyKey(byNumber.bookId(), byNumber.bookCopyId())))
+                .map(this::details);
+    }
+
+    /** The copies a member has out right now. */
+    public List<BookCopyDetails> findCopiesLentTo(UUID memberId) {
+        return copies.findByMemberId(memberId).stream().map(this::details).toList();
+    }
+
+    /**
+     * Lends an AVAILABLE copy to a member. The checks about the member (limits, overdue books) are circulation's
+     * job; this only makes sure the copy itself can go out, and that nobody else lends it at the same moment.
+     */
+    public BookCopyDetails markLent(UUID bookId, UUID bookCopyId, UUID memberId, LocalDate dueDate) {
+        BookDetails book = requireBook(bookId);
+        BookCopy copy = requireCopy(bookId, bookCopyId);
+        if (copy.status() != BookCopyStatus.AVAILABLE) {
+            throw new ConflictException("Book copy " + copy.inventoryNumber() + " can't be lent because it's "
+                    + copy.status());
+        }
+        BookCopy lent = copy.lentTo(UUID.randomUUID(), memberId, now(), dueDate);
+        writeChange(copy, lent);
+        log.info("Lent book copy {} ({}) to member {} until {}", copy.bookCopyId(), copy.inventoryNumber(),
+                memberId, dueDate);
+        refreshHoldings(book, lent);
+        return details(lent);
+    }
+
+    /** Puts a lent copy back on the shelf. {@code loanId} is the loan the caller saw, so a stale return fails. */
+    public BookCopyDetails markReturned(UUID bookId, UUID bookCopyId, UUID loanId) {
+        BookDetails book = requireBook(bookId);
+        BookCopy copy = requireLoan(bookId, bookCopyId, loanId);
+        BookCopy returned = copy.returned();
+        writeChange(copy, returned);
+        log.info("Book copy {} ({}) was returned by member {}", copy.bookCopyId(), copy.inventoryNumber(),
+                copy.memberId());
+        refreshHoldings(book, returned);
+        return details(returned);
+    }
+
+    /**
+     * Moves a loan's due date and counts one more renewal. {@code loanId} and {@code renewalsSeen} are what the
+     * caller checked its rules against, so if the loan changed in between, this fails instead of renewing twice.
+     */
+    public BookCopyDetails extendLoan(UUID bookId, UUID bookCopyId, UUID loanId, int renewalsSeen,
+                                      LocalDate newDueDate) {
+        BookCopy copy = requireLoan(bookId, bookCopyId, loanId);
+        if (copy.renewals() != renewalsSeen) {
+            throw changedMeanwhile(copy);
+        }
+        BookCopy renewed = copy.renewedUntil(newDueDate);
+        writeChange(copy, renewed);
+        log.info("Renewed loan of book copy {} ({}) until {}", copy.bookCopyId(), copy.inventoryNumber(),
+                newDueDate);
+        // Renewing doesn't change any counts, so the holdings stay as they are
+        return details(renewed);
+    }
+
     private BookCopy applyStatus(BookDetails book, BookCopy copy, BookCopyStatus newStatus) {
         if (copy.status() == newStatus) {
             return copy;
@@ -111,8 +181,7 @@ public class BookCopyService {
                     + " is lent out. Its status changes back when it's returned");
         }
         if (!statusChanges.change(copy, newStatus)) {
-            throw new ConflictException("Book copy " + copy.inventoryNumber()
-                    + " was changed by someone else at the same time. Try again");
+            throw changedMeanwhile(copy);
         }
         log.info("Book copy {} ({}) went from {} to {}", copy.bookCopyId(), copy.inventoryNumber(),
                 copy.status(), newStatus);
@@ -126,8 +195,42 @@ public class BookCopyService {
     }
 
     private BookCopy requireCopy(UUID bookId, UUID bookCopyId) {
-        return copies.findById(BasicMapId.id("bookId", bookId).with("bookCopyId", bookCopyId))
+        return copies.findById(copyKey(bookId, bookCopyId))
                 .orElseThrow(() -> new NotFoundException("Book " + bookId + " has no copy with id " + bookCopyId));
+    }
+
+    private BookCopy requireLoan(UUID bookId, UUID bookCopyId, UUID loanId) {
+        BookCopy copy = requireCopy(bookId, bookCopyId);
+        if (copy.loanId() == null) {
+            throw new ConflictException("Book copy " + copy.inventoryNumber() + " isn't lent out");
+        }
+        if (!copy.loanId().equals(loanId)) {
+            throw changedMeanwhile(copy);
+        }
+        return copy;
+    }
+
+    private void writeChange(BookCopy current, BookCopy updated) {
+        if (!statusChanges.replace(current, updated)) {
+            throw changedMeanwhile(current);
+        }
+    }
+
+    private static ConflictException changedMeanwhile(BookCopy copy) {
+        return new ConflictException("Book copy " + copy.inventoryNumber()
+                + " was changed by someone else at the same time. Try again");
+    }
+
+    private static MapId copyKey(UUID bookId, UUID bookCopyId) {
+        return BasicMapId.id("bookId", bookId).with("bookCopyId", bookCopyId);
+    }
+
+    private BookCopyDetails details(BookCopy copy) {
+        return BookCopyDetails.from(copy, LocalDate.now(clock));
+    }
+
+    private Instant now() {
+        return Instant.now(clock).truncatedTo(ChronoUnit.MILLIS);
     }
 
     private void refreshHoldings(BookDetails book, BookCopy changedCopy) {

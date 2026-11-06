@@ -106,6 +106,7 @@ class BookHoldingsRefresherTest {
     }
 
     private static BookCopy copy(BookCopyStatus status) {
-        return new BookCopy(DUNE.bookId(), UUID.randomUUID(), "LIB-" + UUID.randomUUID(), status, Instant.now());
+        return new BookCopy(DUNE.bookId(), UUID.randomUUID(), "LIB-" + UUID.randomUUID(), status, Instant.now(),
+                null, null, null, null, null);
     }
 }
