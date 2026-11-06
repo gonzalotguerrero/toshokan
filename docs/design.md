@@ -23,7 +23,7 @@ Each Cassandra table is designed around a query, so the same data often lives in
 | `book_holdings`                   | one partition → `sort_title`, `book_id`           | `GET /books`                          |
 | `members`                         | `member_id`                                       | A member by id                        |
 | `members_by_card_number`          | `card_number`                                     | Card uniqueness, and the member behind a card |
-| `member_directory`                | one partition → `sort_name`, `member_id`          | The member list, by name              |
+| `member_directory`                | one partition → `sort_name`, `member_id`          | The order of the member list, by name |
 | `loans_by_copy`                   | `book_copy_id` → `lent_at` desc, `loan_id`        | A copy's loan history                 |
 | `loans_by_member`                 | `member_id` → `lent_at` desc, `loan_id`           | A member's loan history               |
 | `book_locks`                      | `book_id`                                         | The per-book lock                     |
@@ -38,12 +38,19 @@ library, and it's what lets them be listed in order.
 The rule is that no row's correctness may depend on a later write that might never happen.
 
 - **Uniqueness goes through conditional writes.** ISBNs, inventory numbers and card numbers are claimed with
-  `IF NOT EXISTS` before anything else is written, and released only by their owner if the rest fails. A new
-  book can take over an ISBN claim whose book doesn't exist, as long as the claim is more than 10 minutes old.
-  A younger claim may belong to a create that's still in progress.
-- **Rows that repeat other rows are written together.** A book with its title and author rows, a member with
-  their directory entry, and the two loan history tables are each written in one logged batch, so either all
-  the rows are applied or none are.
+  `IF NOT EXISTS` before anything else is written.
+  - If saving the owner then fails, the claim is released only when the write certainly didn't happen (for
+    example, too few replicas were up). After a timeout or a lost connection the write may still land, so the
+    claim is kept (see `WriteOutcomes`).
+  - A claim whose owner doesn't exist can be taken over by a new owner once it's more than 10 minutes old (see
+    `StaleClaims`). A younger claim may belong to a create that's still in progress.
+  - Releasing and taking over are both conditional on the current owner, so neither can touch a claim that has
+    already moved on.
+- **Rows that repeat other rows are written together.** A book with its title and author rows, and the two loan
+  history tables, are each written in one logged batch, so either all the rows are applied or none are.
+- **A member changes with one conditional write.** Every write to `members` is conditional: new members use
+  `IF NOT EXISTS`, and changes use `IF version = ?` with the version that was read. If someone else changed the
+  member in between, the request gets a 409 instead of overwriting their change.
 - **A copy is the truth about its own loan.** Its status and current loan always change together, in one
   conditional `UPDATE ... IF`. Every write to `book_copies_by_book` is conditional, because conditional and
   plain writes are timestamped by different clocks, and mixing them on one row can lose updates.
@@ -63,6 +70,18 @@ against the copy when it's read:
 - Otherwise, the row comes from a lend that never went through, and it's left out.
 
 Rows left out this way are why a history page can have fewer items than asked for.
+
+### Member directory
+
+A directory entry can't share a batch with the member's conditional write, so it's written just before it. An
+entry on its own proves nothing, so the member list checks each one against the member:
+
+- An entry is shown only if the member exists and their current name gives the entry's `sort_name`.
+- What's shown (name, contact details, status) always comes from `members`.
+
+Entries left behind by a rename, by a change that lost a race, or by a sign-up that failed are skipped. Renaming
+never deletes the old entry: the delete could arrive late and remove the entry the member needs again after
+renaming back. As with loan history, skipped entries mean a page can have fewer items than asked for.
 
 ### The exception: holdings
 

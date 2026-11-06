@@ -6,6 +6,9 @@ import io.github.gonzalotguerrero.toshokan.members.model.Member;
 import io.github.gonzalotguerrero.toshokan.members.model.MemberByCardNumber;
 import io.github.gonzalotguerrero.toshokan.members.model.MemberDirectoryEntry;
 import io.github.gonzalotguerrero.toshokan.members.model.MemberStatus;
+import io.github.gonzalotguerrero.toshokan.members.repository.CardNumberClaims;
+import io.github.gonzalotguerrero.toshokan.members.repository.MemberRepository;
+import io.github.gonzalotguerrero.toshokan.members.repository.MemberWriter;
 import io.github.gonzalotguerrero.toshokan.shared.paging.PageResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,6 +21,9 @@ import org.springframework.data.cassandra.core.CassandraOperations;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
 
@@ -34,6 +40,15 @@ class MemberApiIntegrationTest {
 
     @Autowired
     private CassandraOperations cassandra;
+
+    @Autowired
+    private CardNumberClaims cardNumberClaims;
+
+    @Autowired
+    private MemberRepository memberRepository;
+
+    @Autowired
+    private MemberWriter memberWriter;
 
     private RestTestClient client;
 
@@ -155,6 +170,80 @@ class MemberApiIntegrationTest {
     void answersAnUnknownMemberWithNotFound() {
         client.delete().uri("/api/v1/members/{memberId}", UUID.randomUUID()).exchange()
                 .expectStatus().isNotFound();
+    }
+
+    @Test
+    void aNewMemberTakesOverAnOldCardClaimWhoseMemberNeverGotSaved() {
+        // What a sign-up leaves behind if saving the member failed in a way that might still have worked. Written
+        // with an old timestamp on purpose, so it looks like it's been there for an hour.
+        long anHourAgo = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.now().minus(Duration.ofHours(1)));
+        cassandra.getCqlOperations().execute(
+                "INSERT INTO members_by_card_number (card_number, member_id) VALUES (?, ?) USING TIMESTAMP "
+                        + anHourAgo, "CARD-0001", UUID.randomUUID());
+
+        MemberDetails ana = createMember("CARD-0001", "Ana Pérez", "ana@example.com");
+
+        assertThat(listMembers("?cardNumber=CARD-0001").items()).containsExactly(ana);
+    }
+
+    @Test
+    void aFreshCardClaimIsLeftAloneEvenIfItsMemberIsNotThereYet() {
+        // Looks just like a sign-up that has claimed the card and is about to save the member
+        assertThat(cardNumberClaims.claim("CARD-0001", UUID.randomUUID())).isTrue();
+
+        client.post().uri("/api/v1/members").contentType(MediaType.APPLICATION_JSON)
+                .body("{\"cardNumber\": \"CARD-0001\", \"fullName\": \"Ana\", \"phone\": \"555\"}")
+                .exchange()
+                .expectStatus().isEqualTo(409);
+    }
+
+    @Test
+    void renamingBackAndForthLeavesTheMemberListedOnceUnderTheirCurrentName() {
+        MemberDetails ana = createMember("CARD-0001", "Ana Pérez", "ana@example.com");
+        updateMember(ana.memberId(), "{\"fullName\": \"Ana Gómez\"}").expectStatus().isOk();
+        updateMember(ana.memberId(), "{\"fullName\": \"Ana Pérez\"}").expectStatus().isOk();
+
+        assertThat(listAllMembers()).extracting(MemberDetails::fullName).containsExactly("Ana Pérez");
+    }
+
+    @Test
+    void directoryEntriesThatDoNotMatchAMemberAreLeftOut() {
+        MemberDetails ana = createMember("CARD-0001", "Ana Pérez", "ana@example.com");
+        // Left behind by a rename that lost a race, and by a sign-up whose member was never saved
+        cassandra.insert(new MemberDirectoryEntry(MemberDirectoryEntry.DIRECTORY_PARTITION, "aaron", ana.memberId()));
+        cassandra.insert(new MemberDirectoryEntry(MemberDirectoryEntry.DIRECTORY_PARTITION, "abel", UUID.randomUUID()));
+
+        assertThat(listAllMembers()).containsExactly(ana);
+    }
+
+    @Test
+    void aChangeBasedOnAnOldReadCannotUndoADeactivation() {
+        MemberDetails ana = createMember("CARD-0001", "Ana Pérez", "ana@example.com");
+        // A rename that read Ana before she was deactivated, and only gets to write afterwards
+        Member before = memberRepository.findById(ana.memberId()).orElseThrow();
+        client.delete().uri("/api/v1/members/{memberId}", ana.memberId()).exchange().expectStatus().isNoContent();
+
+        boolean applied = memberWriter.update(before, before.withContactDetails("Ana Gómez", before.email(), null));
+
+        assertThat(applied).isFalse();
+        MemberDetails now = client.get().uri("/api/v1/members/{memberId}", ana.memberId()).exchange()
+                .expectStatus().isOk()
+                .expectBody(MemberDetails.class).returnResult().getResponseBody();
+        assertThat(now.status()).isEqualTo(MemberStatus.INACTIVE);
+        assertThat(now.fullName()).isEqualTo("Ana Pérez");
+    }
+
+    @Test
+    void aMemberSavedBeforeVersionsExistedCanStillBeChanged() {
+        MemberDetails ana = createMember("CARD-0001", "Ana Pérez", "ana@example.com");
+        // Members created before the version column was added have no version at all
+        cassandra.getCqlOperations().execute(
+                "UPDATE members SET version = null WHERE member_id = ? IF EXISTS", ana.memberId());
+
+        updateMember(ana.memberId(), "{\"fullName\": \"Ana Gómez\"}").expectStatus().isOk();
+
+        assertThat(memberRepository.findById(ana.memberId()).orElseThrow().version()).isEqualTo(1L);
+        assertThat(listAllMembers()).extracting(MemberDetails::fullName).containsExactly("Ana Gómez");
     }
 
     private MemberDetails createMember(String cardNumber, String fullName, String email) {

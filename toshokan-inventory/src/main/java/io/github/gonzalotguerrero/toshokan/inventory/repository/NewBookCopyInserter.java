@@ -25,10 +25,11 @@ public class NewBookCopyInserter {
         this.cassandra = cassandra;
     }
 
-    /** The copy's id is a fresh random UUID, so in practice this never finds an existing row. */
-    public void insert(BookCopy copy) {
-        if (!cassandra.insert(copy, IF_NOT_EXISTS).wasApplied()) {
-            throw new IllegalStateException("A book copy with id " + copy.bookCopyId() + " already exists");
-        }
+    /**
+     * Returns {@code false} if a copy with this id already exists. The id is a fresh random UUID, so in practice
+     * that never happens, but when it does nothing was written.
+     */
+    public boolean insert(BookCopy copy) {
+        return cassandra.insert(copy, IF_NOT_EXISTS).wasApplied();
     }
 }

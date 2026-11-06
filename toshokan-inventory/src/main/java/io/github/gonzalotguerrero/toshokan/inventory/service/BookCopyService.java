@@ -12,6 +12,8 @@ import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyStatusCh
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookLocks;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.InventoryNumberClaims;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.NewBookCopyInserter;
+import io.github.gonzalotguerrero.toshokan.shared.cassandra.StaleClaims;
+import io.github.gonzalotguerrero.toshokan.shared.cassandra.WriteOutcomes;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.ConflictException;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.NotFoundException;
 import org.slf4j.Logger;
@@ -74,14 +76,23 @@ public class BookCopyService {
         String inventoryNumber = request.inventoryNumber().strip();
         BookCopy copy = BookCopy.newCopy(bookId, UUID.randomUUID(), inventoryNumber, now());
 
-        if (!inventoryNumbers.claim(inventoryNumber, bookId, copy.bookCopyId())) {
+        if (!claimInventoryNumber(inventoryNumber, bookId, copy.bookCopyId())) {
             throw new ConflictException("Inventory number " + inventoryNumber + " is already in use");
         }
+        boolean inserted;
         try {
-            newCopies.insert(copy);
+            inserted = newCopies.insert(copy);
         } catch (RuntimeException e) {
-            inventoryNumbers.release(inventoryNumber, bookId, copy.bookCopyId());
+            // If the copy might still get saved (a timeout, say), the number has to stay its own. Should the copy
+            // never arrive, the claim goes stale and the next copy with this number takes it over
+            if (WriteOutcomes.definitelyNotApplied(e)) {
+                inventoryNumbers.release(inventoryNumber, bookId, copy.bookCopyId());
+            }
             throw e;
+        }
+        if (!inserted) {
+            inventoryNumbers.release(inventoryNumber, bookId, copy.bookCopyId());
+            throw new IllegalStateException("A book copy with id " + copy.bookCopyId() + " already exists");
         }
         log.info("Added copy {} ({}) of book {}", copy.bookCopyId(), inventoryNumber, bookId);
         refreshHoldings(book, copy);
@@ -221,6 +232,30 @@ public class BookCopyService {
         BookCopy updated = copy.withStatus(newStatus);
         refreshHoldings(book, updated);
         return updated;
+    }
+
+    /**
+     * Claims an inventory number for a new copy. If another copy holds it, the claim is only taken over when it's
+     * stale (see {@link StaleClaims}), which means a create that failed long enough ago.
+     */
+    private boolean claimInventoryNumber(String inventoryNumber, UUID bookId, UUID bookCopyId) {
+        if (inventoryNumbers.claim(inventoryNumber, bookId, bookCopyId)) {
+            return true;
+        }
+        Optional<InventoryNumberClaims.Claim> current = inventoryNumbers.currentClaim(inventoryNumber);
+        if (current.isEmpty()) {
+            // Freed between our claim and this read, so it's worth one more try
+            return inventoryNumbers.claim(inventoryNumber, bookId, bookCopyId);
+        }
+        InventoryNumberClaims.Claim claim = current.get();
+        boolean ownerExists = copies.existsById(copyKey(claim.bookId(), claim.bookCopyId()));
+        if (StaleClaims.isStale(claim.claimedAt(), ownerExists, clock)
+                && inventoryNumbers.takeOver(inventoryNumber, claim, bookId, bookCopyId)) {
+            log.info("Took over inventory number {} from copy {}, which doesn't exist", inventoryNumber,
+                    claim.bookCopyId());
+            return true;
+        }
+        return false;
     }
 
     private BookDetails requireBook(UUID bookId) {

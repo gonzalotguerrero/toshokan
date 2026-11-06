@@ -2,23 +2,24 @@ package io.github.gonzalotguerrero.toshokan.members.model;
 
 import org.springframework.data.cassandra.core.cql.Ordering;
 import org.springframework.data.cassandra.core.cql.PrimaryKeyType;
-import org.springframework.data.cassandra.core.mapping.Column;
 import org.springframework.data.cassandra.core.mapping.PrimaryKeyColumn;
 import org.springframework.data.cassandra.core.mapping.Table;
 
-import java.time.Instant;
 import java.util.Locale;
 import java.util.UUID;
 
 /**
- * A member as they appear in the list of all members, sorted by name regardless of case.
+ * Where a member sits in the list of all members, sorted by name regardless of case.
  *
- * <p>Like the book holdings, every row shares the same {@code directory_partition}
- * ({@link #DIRECTORY_PARTITION}), so the whole list is one partition that Cassandra keeps sorted for us. A single
- * library's members fit in one partition comfortably.
+ * <p>Like the book holdings, every row shares the same {@code directory_partition} ({@link #DIRECTORY_PARTITION}),
+ * so the whole list is one partition that Cassandra keeps sorted for us. A single library's members fit in one
+ * partition comfortably.
  *
- * <p>It's a full copy of the member, so listing doesn't need a second read per row. Because the name is part of
- * the key, renaming a member means deleting their old row and writing a new one.
+ * <p>An entry only gives the order. It's written before the member's own (conditional) write, so it can't be
+ * trusted on its own: the list shows an entry only if the member's current name still gives this
+ * {@code sort_name}, and it shows the member's details from {@code members}. Entries left over from a rename, or
+ * from a change that lost a race, are simply skipped. That's also why renaming never deletes the old entry: the
+ * delete could arrive late and remove an entry the member needs again after renaming back.
  */
 @Table("member_directory")
 public record MemberDirectoryEntry(
@@ -30,14 +31,7 @@ public record MemberDirectoryEntry(
         String sortName,
 
         @PrimaryKeyColumn(name = "member_id", ordinal = 2, type = PrimaryKeyType.CLUSTERED, ordering = Ordering.ASCENDING)
-        UUID memberId,
-
-        @Column("card_number") String cardNumber,
-        @Column("full_name") String fullName,
-        @Column("email") String email,
-        @Column("phone") String phone,
-        @Column("status") MemberStatus status,
-        @Column("joined_at") Instant joinedAt
+        UUID memberId
 ) {
 
     public static final int DIRECTORY_PARTITION = 0;
@@ -47,8 +41,11 @@ public record MemberDirectoryEntry(
     }
 
     public static MemberDirectoryEntry of(Member member) {
-        return new MemberDirectoryEntry(DIRECTORY_PARTITION, sortKeyFor(member.fullName()), member.memberId(),
-                member.cardNumber(), member.fullName(), member.email(), member.phone(), member.status(),
-                member.joinedAt());
+        return new MemberDirectoryEntry(DIRECTORY_PARTITION, sortKeyFor(member.fullName()), member.memberId());
+    }
+
+    /** Whether this entry is where {@code member} belongs in the list right now. */
+    public boolean isCurrentFor(Member member) {
+        return member.memberId().equals(memberId) && sortKeyFor(member.fullName()).equals(sortName);
     }
 }

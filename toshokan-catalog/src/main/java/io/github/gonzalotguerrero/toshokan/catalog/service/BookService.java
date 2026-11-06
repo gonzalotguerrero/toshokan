@@ -12,6 +12,8 @@ import io.github.gonzalotguerrero.toshokan.catalog.repository.BookByTitleReposit
 import io.github.gonzalotguerrero.toshokan.catalog.repository.BookRepository;
 import io.github.gonzalotguerrero.toshokan.catalog.repository.BookWriter;
 import io.github.gonzalotguerrero.toshokan.catalog.repository.IsbnClaims;
+import io.github.gonzalotguerrero.toshokan.shared.cassandra.StaleClaims;
+import io.github.gonzalotguerrero.toshokan.shared.cassandra.WriteOutcomes;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.ConflictException;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.InvalidRequestException;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.NotFoundException;
@@ -21,7 +23,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
-import org.springframework.data.cassandra.CassandraWriteTimeoutException;
 import org.springframework.data.cassandra.core.query.CassandraPageRequest;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Slice;
@@ -29,7 +30,6 @@ import org.springframework.stereotype.Service;
 
 import java.nio.ByteBuffer;
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.Year;
 import java.time.temporal.ChronoUnit;
@@ -52,16 +52,6 @@ public class BookService {
 
     public static final int DEFAULT_PAGE_SIZE = 20;
     public static final int MAX_PAGE_SIZE = 100;
-
-    /*
-     * How old a claim on an ISBN has to be before a new book may take it over from a book that doesn't exist. A
-     * create claims the ISBN a moment before it saves the book, and a logged batch that timed out can take a few
-     * seconds to be applied, so a young claim may still be about to get its book.
-     */
-    private static final Duration STALE_CLAIM_AGE = Duration.ofMinutes(10);
-
-    // The write type Cassandra reports when a logged batch timed out after it was already written to the batch log
-    private static final String BATCH_ALREADY_LOGGED = "BATCH";
 
     private final BookRepository books;
     private final BookByIsbnRepository booksByIsbn;
@@ -119,15 +109,10 @@ public class BookService {
         }
         try {
             writer.save(book);
-        } catch (CassandraWriteTimeoutException e) {
-            if (isbn != null && !BATCH_ALREADY_LOGGED.equals(e.getWriteType())) {
-                isbnClaims.release(isbn, book.bookId());
-            }
-            // Otherwise Cassandra already has the batch and will finish applying it, so the book is coming and
-            // the ISBN has to stay its own
-            throw e;
         } catch (RuntimeException e) {
-            if (isbn != null) {
+            // If the book might still get saved (a timeout, say), the ISBN has to stay its own. Should the book
+            // never arrive, the claim goes stale and the next book with this ISBN takes it over
+            if (isbn != null && WriteOutcomes.definitelyNotApplied(e)) {
                 isbnClaims.release(isbn, book.bookId());
             }
             throw e;
@@ -203,9 +188,8 @@ public class BookService {
     }
 
     /**
-     * Claims an ISBN for a new book. If another book holds it, the claim is only taken over when that book doesn't
-     * exist and the claim is old enough that it never will (see {@link #STALE_CLAIM_AGE}). That happens when a
-     * create failed, or a delete couldn't free the ISBN.
+     * Claims an ISBN for a new book. If another book holds it, the claim is only taken over when it's stale (see
+     * {@link StaleClaims}). That happens when a create failed, or a delete couldn't free the ISBN.
      */
     private boolean claimIsbn(String isbn, UUID bookId) {
         if (isbnClaims.claim(isbn, bookId)) {
@@ -217,8 +201,7 @@ public class BookService {
             return isbnClaims.claim(isbn, bookId);
         }
         IsbnClaims.Claim claim = current.get();
-        boolean stale = claim.claimedAt().isBefore(clock.instant().minus(STALE_CLAIM_AGE))
-                && books.findById(claim.bookId()).isEmpty();
+        boolean stale = StaleClaims.isStale(claim.claimedAt(), books.existsById(claim.bookId()), clock);
         if (stale && isbnClaims.takeOver(isbn, claim.bookId(), bookId)) {
             log.info("Took over ISBN {} from book {}, which doesn't exist", isbn, claim.bookId());
             return true;

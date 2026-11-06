@@ -1,7 +1,6 @@
 package io.github.gonzalotguerrero.toshokan.members.dto;
 
 import io.github.gonzalotguerrero.toshokan.members.model.Member;
-import io.github.gonzalotguerrero.toshokan.members.model.MemberDirectoryEntry;
 import io.github.gonzalotguerrero.toshokan.members.model.MemberStatus;
 
 import java.time.Instant;
@@ -21,10 +20,5 @@ public record MemberDetails(
     public static MemberDetails from(Member member) {
         return new MemberDetails(member.memberId(), member.cardNumber(), member.fullName(), member.email(),
                 member.phone(), member.status(), member.joinedAt());
-    }
-
-    public static MemberDetails from(MemberDirectoryEntry entry) {
-        return new MemberDetails(entry.memberId(), entry.cardNumber(), entry.fullName(), entry.email(),
-                entry.phone(), entry.status(), entry.joinedAt());
     }
 }

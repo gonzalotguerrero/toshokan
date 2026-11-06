@@ -77,8 +77,8 @@ then send the `nextPageToken` from the previous page:
 }
 ```
 
-`nextPageToken` is `null` on the last page. A loan history page can have fewer items than `pageSize` even when
-more pages follow (the [design notes](design.md#loan-history) explain why).
+`nextPageToken` is `null` on the last page. Loan history and member list pages can have fewer items than
+`pageSize` even when more pages follow (the [design notes](design.md#keeping-the-data-consistent) explain why).
 
 ## Errors
 
@@ -100,6 +100,10 @@ Errors come back as [Problem Details](https://www.rfc-editor.org/rfc/rfc9457):
 
 A 409 that says something is being changed "at the same time" or "right now" means another request got there
 first. Trying again is safe.
+
+A 500 from a create (book, copy or member) can mean Cassandra timed out and the write may still land. The
+number it claimed stays taken until either the record appears or 10 minutes pass, so retrying straight away can
+answer 409 "already in use".
 
 ## Walkthrough
 

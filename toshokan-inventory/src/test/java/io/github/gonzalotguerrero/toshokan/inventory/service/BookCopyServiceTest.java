@@ -21,6 +21,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.cassandra.CassandraInsufficientReplicasAvailableException;
+import org.springframework.data.cassandra.CassandraWriteTimeoutException;
 import org.springframework.data.cassandra.core.mapping.BasicMapId;
 
 import java.time.Clock;
@@ -93,6 +95,7 @@ class BookCopyServiceTest {
         givenTheLockIsFree();
         when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
         when(inventoryNumbers.claim(eq("LIB-000123"), eq(DUNE.bookId()), any())).thenReturn(true);
+        when(newCopies.insert(any(BookCopy.class))).thenReturn(true);
 
         BookCopyDetails added = service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("  LIB-000123 "));
 
@@ -123,25 +126,88 @@ class BookCopyServiceTest {
         givenTheLockIsFree();
         when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
         when(inventoryNumbers.claim(anyString(), any(), any())).thenReturn(false);
+        InventoryNumberClaims.Claim held = new InventoryNumberClaims.Claim(DUNE.bookId(), UUID.randomUUID(),
+                Instant.parse("2026-01-01T00:00:00Z"));
+        when(inventoryNumbers.currentClaim("LIB-000123")).thenReturn(Optional.of(held));
+        when(copies.existsById(BasicMapId.id("bookId", DUNE.bookId()).with("bookCopyId", held.bookCopyId())))
+                .thenReturn(true);
 
         assertThatThrownBy(() -> service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("LIB-000123")))
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("Inventory number LIB-000123 is already in use");
         verify(newCopies, never()).insert(any(BookCopy.class));
+        verify(inventoryNumbers, never()).takeOver(any(), any(), any(), any());
         verifyNoInteractions(holdingsRefresher);
     }
 
     @Test
-    void givesTheInventoryNumberBackIfSavingTheCopyFails() {
+    void takesOverAnOldNumberClaimWhoseCopyDoesNotExist() {
+        givenTheLockIsFree();
+        when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
+        when(inventoryNumbers.claim(anyString(), any(), any())).thenReturn(false);
+        InventoryNumberClaims.Claim stale = new InventoryNumberClaims.Claim(DUNE.bookId(), UUID.randomUUID(),
+                CLOCK.instant().minusSeconds(3600));
+        when(inventoryNumbers.currentClaim("LIB-000123")).thenReturn(Optional.of(stale));
+        when(copies.existsById(BasicMapId.id("bookId", DUNE.bookId()).with("bookCopyId", stale.bookCopyId())))
+                .thenReturn(false);
+        when(inventoryNumbers.takeOver(eq("LIB-000123"), eq(stale), eq(DUNE.bookId()), any())).thenReturn(true);
+        when(newCopies.insert(any(BookCopy.class))).thenReturn(true);
+
+        BookCopyDetails added = service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("LIB-000123"));
+
+        verify(inventoryNumbers).takeOver("LIB-000123", stale, DUNE.bookId(), added.bookCopyId());
+    }
+
+    @Test
+    void leavesAYoungNumberClaimAloneEvenIfItsCopyIsNotThereYet() {
+        givenTheLockIsFree();
+        when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
+        when(inventoryNumbers.claim(anyString(), any(), any())).thenReturn(false);
+        when(inventoryNumbers.currentClaim("LIB-000123")).thenReturn(Optional.of(new InventoryNumberClaims.Claim(
+                DUNE.bookId(), UUID.randomUUID(), CLOCK.instant().minusSeconds(5))));
+
+        assertThatThrownBy(() -> service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("LIB-000123")))
+                .isInstanceOf(ConflictException.class);
+        verify(inventoryNumbers, never()).takeOver(any(), any(), any(), any());
+    }
+
+    @Test
+    void givesTheInventoryNumberBackIfTheCopyWasCertainlyNotSaved() {
         givenTheLockIsFree();
         when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
         when(inventoryNumbers.claim(anyString(), any(), any())).thenReturn(true);
-        doThrow(new IllegalStateException("Cassandra is down")).when(newCopies).insert(any(BookCopy.class));
+        doThrow(new CassandraInsufficientReplicasAvailableException(1, 0, "unavailable", null))
+                .when(newCopies).insert(any(BookCopy.class));
+
+        assertThatThrownBy(() -> service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("LIB-000123")))
+                .isInstanceOf(CassandraInsufficientReplicasAvailableException.class);
+        verify(inventoryNumbers).release(eq("LIB-000123"), eq(DUNE.bookId()), any());
+        verifyNoInteractions(holdingsRefresher);
+    }
+
+    @Test
+    void keepsTheInventoryNumberIfTheCopyMightStillBeSaved() {
+        givenTheLockIsFree();
+        when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
+        when(inventoryNumbers.claim(anyString(), any(), any())).thenReturn(true);
+        doThrow(new CassandraWriteTimeoutException("CAS", "timed out", null))
+                .when(newCopies).insert(any(BookCopy.class));
+
+        assertThatThrownBy(() -> service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("LIB-000123")))
+                .isInstanceOf(CassandraWriteTimeoutException.class);
+        verify(inventoryNumbers, never()).release(anyString(), any(), any());
+    }
+
+    @Test
+    void givesTheInventoryNumberBackIfACopyWithTheSameIdAlreadyExisted() {
+        givenTheLockIsFree();
+        when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
+        when(inventoryNumbers.claim(anyString(), any(), any())).thenReturn(true);
+        when(newCopies.insert(any(BookCopy.class))).thenReturn(false);
 
         assertThatThrownBy(() -> service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("LIB-000123")))
                 .isInstanceOf(IllegalStateException.class);
         verify(inventoryNumbers).release(eq("LIB-000123"), eq(DUNE.bookId()), any());
-        verifyNoInteractions(holdingsRefresher);
     }
 
     @Test
@@ -149,6 +215,7 @@ class BookCopyServiceTest {
         givenTheLockIsFree();
         when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
         when(inventoryNumbers.claim(anyString(), any(), any())).thenReturn(true);
+        when(newCopies.insert(any(BookCopy.class))).thenReturn(true);
         doThrow(new IllegalStateException("Cassandra hiccup")).when(holdingsRefresher).refresh(DUNE);
 
         BookCopyDetails added = service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("LIB-000123"));

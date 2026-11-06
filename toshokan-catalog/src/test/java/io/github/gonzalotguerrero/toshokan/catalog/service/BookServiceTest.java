@@ -24,6 +24,7 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.data.cassandra.CassandraInsufficientReplicasAvailableException;
 import org.springframework.data.cassandra.CassandraWriteTimeoutException;
 import org.springframework.data.domain.SliceImpl;
 
@@ -130,7 +131,7 @@ class BookServiceTest {
         when(isbnClaims.claim(anyString(), any())).thenReturn(false);
         when(isbnClaims.currentClaim("9780441013593"))
                 .thenReturn(Optional.of(new IsbnClaims.Claim(other.bookId(), NOW.minus(Duration.ofDays(30)))));
-        when(books.findById(other.bookId())).thenReturn(Optional.of(other));
+        when(books.existsById(other.bookId())).thenReturn(true);
 
         assertThatThrownBy(() -> service.createBook(request("9780441013593")))
                 .isInstanceOf(ConflictException.class)
@@ -140,33 +141,24 @@ class BookServiceTest {
     }
 
     @Test
-    void givesTheIsbnBackIfSavingTheBookFails() {
+    void givesTheIsbnBackIfTheBookWasCertainlyNotSaved() {
         when(isbnClaims.claim(anyString(), any())).thenReturn(true);
-        doThrow(new IllegalStateException("Cassandra is down")).when(writer).save(any());
+        doThrow(new CassandraInsufficientReplicasAvailableException(1, 0, "unavailable", null))
+                .when(writer).save(any());
 
         assertThatThrownBy(() -> service.createBook(request("9780441013593")))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(CassandraInsufficientReplicasAvailableException.class);
         verify(isbnClaims).release(eq("9780441013593"), any());
     }
 
     @Test
-    void givesTheIsbnBackIfTheBatchTimedOutBeforeItWasLogged() {
+    void keepsTheIsbnIfTheBookMightStillBeSaved() {
         when(isbnClaims.claim(anyString(), any())).thenReturn(true);
         doThrow(new CassandraWriteTimeoutException("BATCH_LOG", "timed out", null)).when(writer).save(any());
 
         assertThatThrownBy(() -> service.createBook(request("9780441013593")))
                 .isInstanceOf(CassandraWriteTimeoutException.class);
-        verify(isbnClaims).release(eq("9780441013593"), any());
-    }
-
-    @Test
-    void keepsTheIsbnIfTheBatchWasAlreadyLogged() {
-        when(isbnClaims.claim(anyString(), any())).thenReturn(true);
-        doThrow(new CassandraWriteTimeoutException("BATCH", "timed out", null)).when(writer).save(any());
-
-        assertThatThrownBy(() -> service.createBook(request("9780441013593")))
-                .isInstanceOf(CassandraWriteTimeoutException.class);
-        // The book is still going to be written, so the ISBN has to stay its own
+        // If the book lands after all, it needs its ISBN. If it doesn't, the claim goes stale and gets taken over
         verify(isbnClaims, never()).release(any(), any());
     }
 
@@ -210,7 +202,7 @@ class BookServiceTest {
         when(isbnClaims.claim(eq("9780441013593"), any())).thenReturn(false);
         when(isbnClaims.currentClaim("9780441013593"))
                 .thenReturn(Optional.of(new IsbnClaims.Claim(gone, NOW.minus(Duration.ofHours(1)))));
-        when(books.findById(gone)).thenReturn(Optional.empty());
+        when(books.existsById(gone)).thenReturn(false);
         when(isbnClaims.takeOver(eq("9780441013593"), eq(gone), any())).thenReturn(true);
 
         BookDetails created = service.createBook(request("9780441013593"));

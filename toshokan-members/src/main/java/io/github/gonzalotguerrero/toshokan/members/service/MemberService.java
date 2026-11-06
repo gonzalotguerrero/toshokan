@@ -11,6 +11,8 @@ import io.github.gonzalotguerrero.toshokan.members.repository.MemberByCardNumber
 import io.github.gonzalotguerrero.toshokan.members.repository.MemberDirectoryRepository;
 import io.github.gonzalotguerrero.toshokan.members.repository.MemberRepository;
 import io.github.gonzalotguerrero.toshokan.members.repository.MemberWriter;
+import io.github.gonzalotguerrero.toshokan.shared.cassandra.StaleClaims;
+import io.github.gonzalotguerrero.toshokan.shared.cassandra.WriteOutcomes;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.ConflictException;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.InvalidRequestException;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.NotFoundException;
@@ -19,19 +21,22 @@ import io.github.gonzalotguerrero.toshokan.shared.paging.PageTokens;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
-import org.springframework.data.cassandra.CassandraWriteTimeoutException;
 import org.springframework.data.cassandra.core.query.CassandraPageRequest;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Slice;
 import org.springframework.stereotype.Service;
 
 import java.nio.ByteBuffer;
-import java.time.Instant;
+import java.time.Clock;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Service
 public class MemberService {
@@ -40,9 +45,6 @@ public class MemberService {
     public static final int MAX_PAGE_SIZE = 100;
 
     private static final Logger log = LoggerFactory.getLogger(MemberService.class);
-
-    // The write type Cassandra reports when a logged batch timed out after it was safely recorded
-    private static final String BATCH_ALREADY_LOGGED = "BATCH";
 
     private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     // Deliberately loose: something@something.something. Whether the address really exists is the library's problem
@@ -54,16 +56,18 @@ public class MemberService {
     private final MemberDirectoryRepository directory;
     private final MemberWriter writer;
     private final MemberDeactivationGuard deactivationGuard;
+    private final Clock clock;
 
     public MemberService(MemberRepository members, MemberByCardNumberRepository cardNumbers,
                          CardNumberClaims cardNumberClaims, MemberDirectoryRepository directory,
-                         MemberWriter writer, MemberDeactivationGuard deactivationGuard) {
+                         MemberWriter writer, MemberDeactivationGuard deactivationGuard, Clock clock) {
         this.members = members;
         this.cardNumbers = cardNumbers;
         this.cardNumberClaims = cardNumberClaims;
         this.directory = directory;
         this.writer = writer;
         this.deactivationGuard = deactivationGuard;
+        this.clock = clock;
     }
 
     /** Signs up a new member. They start out ACTIVE, so they can borrow right away. */
@@ -72,24 +76,33 @@ public class MemberService {
         String email = normalizeEmail(request.email());
         String phone = blankToNull(request.phone());
         requireContactDetails(email, phone);
-        Member member = new Member(UUID.randomUUID(), cardNumber, normalizeName(request.fullName()), email, phone,
-                MemberStatus.ACTIVE, Instant.now().truncatedTo(ChronoUnit.MILLIS));
+        Member member = Member.newMember(UUID.randomUUID(), cardNumber, normalizeName(request.fullName()), email,
+                phone, clock.instant().truncatedTo(ChronoUnit.MILLIS));
 
-        if (!cardNumberClaims.claim(cardNumber, member.memberId())) {
+        if (!claimCardNumber(cardNumber, member.memberId())) {
             throw new ConflictException("Card number " + cardNumber + " is already in use");
         }
         try {
-            writer.save(null, member);
-        } catch (CassandraWriteTimeoutException e) {
-            if (!BATCH_ALREADY_LOGGED.equals(e.getWriteType())) {
-                cardNumberClaims.release(cardNumber, member.memberId());
-            }
-            // Otherwise Cassandra already has the batch and will finish applying it, so the member is coming and
-            // the card number has to stay theirs
-            throw e;
+            writer.addToDirectory(member);
         } catch (RuntimeException e) {
+            // The member itself was never written, so the card number can go back whatever happened here
             cardNumberClaims.release(cardNumber, member.memberId());
             throw e;
+        }
+        boolean inserted;
+        try {
+            inserted = writer.insert(member);
+        } catch (RuntimeException e) {
+            // If the member might still get saved (a timeout, say), the card number has to stay theirs. Should
+            // they never arrive, the claim goes stale and the next member with this card takes it over
+            if (WriteOutcomes.definitelyNotApplied(e)) {
+                cardNumberClaims.release(cardNumber, member.memberId());
+            }
+            throw e;
+        }
+        if (!inserted) {
+            cardNumberClaims.release(cardNumber, member.memberId());
+            throw new IllegalStateException("A member with id " + member.memberId() + " already exists");
         }
         log.info("Created member {} with card number {}", member.memberId(), cardNumber);
         return MemberDetails.from(member);
@@ -112,6 +125,10 @@ public class MemberService {
     /**
      * Lists members sorted by name, one page at a time. With a card number, it looks that one member up instead
      * and the page has either one item or none.
+     *
+     * <p>The order comes from the directory, but each entry is checked against the member itself and the details
+     * shown come from there too (see {@link MemberDirectoryEntry}). Entries that no longer match are skipped, so a
+     * page can have fewer items than asked for even when more pages follow.
      *
      * @param cardNumber {@code null} to list everyone
      * @param pageSize   between 1 and {@value #MAX_PAGE_SIZE}
@@ -142,7 +159,16 @@ public class MemberService {
         String nextPageToken = slice.hasNext()
                 ? PageTokens.encode(((CassandraPageRequest) slice.nextPageable()).getPagingState())
                 : null;
-        return new PageResponse<>(slice.map(MemberDetails::from).getContent(), nextPageToken);
+        List<MemberDirectoryEntry> entries = slice.getContent();
+        List<UUID> memberIds = entries.stream().map(MemberDirectoryEntry::memberId).toList();
+        Map<UUID, Member> current = members.findAllById(memberIds).stream()
+                .collect(Collectors.toMap(Member::memberId, Function.identity()));
+        List<MemberDetails> page = entries.stream()
+                .map(entry -> Optional.ofNullable(current.get(entry.memberId())).filter(entry::isCurrentFor))
+                .flatMap(Optional::stream)
+                .map(MemberDetails::from)
+                .toList();
+        return new PageResponse<>(page, nextPageToken);
     }
 
     /**
@@ -163,9 +189,9 @@ public class MemberService {
         }
         if (current.status() == MemberStatus.ACTIVE && status == MemberStatus.INACTIVE) {
             // Setting the status to INACTIVE is a deactivation too, so it gets the same loan checks as DELETE
-            deactivationGuard.runGuarded(memberId, () -> writer.save(current, updated));
+            deactivationGuard.runGuarded(memberId, () -> save(current, updated));
         } else {
-            writer.save(current, updated);
+            save(current, updated);
         }
         log.info("Updated member {}", memberId);
         return MemberDetails.from(updated);
@@ -182,8 +208,45 @@ public class MemberService {
             return;
         }
         Member updated = current.withStatus(MemberStatus.INACTIVE);
-        deactivationGuard.runGuarded(memberId, () -> writer.save(current, updated));
+        deactivationGuard.runGuarded(memberId, () -> save(current, updated));
         log.info("Deactivated member {}", memberId);
+    }
+
+    /**
+     * Writes a change to a member that was read as {@code current}. If anyone changed the member in between, the
+     * write doesn't happen and the request gets a conflict, so no change is ever silently lost. A rename adds the
+     * new directory entry first; if the change then loses the race, that entry is simply skipped when listing.
+     */
+    private void save(Member current, Member updated) {
+        if (!MemberDirectoryEntry.of(current).equals(MemberDirectoryEntry.of(updated))) {
+            writer.addToDirectory(updated);
+        }
+        if (!writer.update(current, updated)) {
+            throw new ConflictException("Member " + current.cardNumber()
+                    + " was changed by someone else at the same time. Try again");
+        }
+    }
+
+    /**
+     * Claims a card number for a new member. If another member holds it, the claim is only taken over when it's
+     * stale (see {@link StaleClaims}), which means a sign-up that failed long enough ago.
+     */
+    private boolean claimCardNumber(String cardNumber, UUID memberId) {
+        if (cardNumberClaims.claim(cardNumber, memberId)) {
+            return true;
+        }
+        Optional<CardNumberClaims.Claim> claim = cardNumberClaims.currentClaim(cardNumber);
+        if (claim.isEmpty()) {
+            // Freed between our claim and this read, so it's worth one more try
+            return cardNumberClaims.claim(cardNumber, memberId);
+        }
+        UUID holder = claim.get().memberId();
+        if (StaleClaims.isStale(claim.get().claimedAt(), members.existsById(holder), clock)
+                && cardNumberClaims.takeOver(cardNumber, holder, memberId)) {
+            log.info("Took over card number {} from member {}, who doesn't exist", cardNumber, holder);
+            return true;
+        }
+        return false;
     }
 
     private Member requireMember(UUID memberId) {

@@ -9,6 +9,7 @@ import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopy;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopyByInventoryNumber;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopyStatus;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookHoldings;
+import io.github.gonzalotguerrero.toshokan.inventory.repository.InventoryNumberClaims;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,6 +21,9 @@ import org.springframework.data.cassandra.core.CassandraOperations;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
 
@@ -39,6 +43,9 @@ class BookCopyApiIntegrationTest {
 
     @Autowired
     private CassandraOperations cassandra;
+
+    @Autowired
+    private InventoryNumberClaims inventoryNumberClaims;
 
     private RestTestClient client;
 
@@ -198,6 +205,34 @@ class BookCopyApiIntegrationTest {
         client.delete().uri("/api/v1/books/{bookId}/copies/{bookCopyId}", dune.bookId(), UUID.randomUUID())
                 .exchange()
                 .expectStatus().isNotFound();
+    }
+
+    @Test
+    void aNewCopyTakesOverAnOldNumberClaimWhoseCopyNeverGotSaved() {
+        BookDetails dune = createBook("Dune");
+        // What adding a copy leaves behind if saving the copy failed in a way that might still have worked.
+        // Written with an old timestamp on purpose, so it looks like it's been there for an hour.
+        long anHourAgo = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.now().minus(Duration.ofHours(1)));
+        cassandra.getCqlOperations().execute("INSERT INTO book_copies_by_inventory_number"
+                        + " (inventory_number, book_id, book_copy_id) VALUES (?, ?, ?) USING TIMESTAMP " + anHourAgo,
+                "LIB-000001", dune.bookId(), UUID.randomUUID());
+
+        BookCopyDetails copy = addBookCopy(dune.bookId(), "LIB-000001");
+
+        assertThat(listBookCopies(dune.bookId())).extracting(BookCopyDetails::bookCopyId)
+                .containsExactly(copy.bookCopyId());
+    }
+
+    @Test
+    void aFreshNumberClaimIsLeftAloneEvenIfItsCopyIsNotThereYet() {
+        BookDetails dune = createBook("Dune");
+        // Looks just like a copy being added that has claimed the number and is about to be saved
+        assertThat(inventoryNumberClaims.claim("LIB-000001", dune.bookId(), UUID.randomUUID())).isTrue();
+
+        client.post().uri("/api/v1/books/{bookId}/copies", dune.bookId()).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"inventoryNumber\": \"LIB-000001\"}")
+                .exchange()
+                .expectStatus().isEqualTo(409);
     }
 
     private BookDetails createBook(String title) {
