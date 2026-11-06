@@ -17,7 +17,7 @@ public record BookSummary(
         int availableCopies
 ) {
 
-    static BookSummary from(BookHoldings entry) {
+    public static BookSummary from(BookHoldings entry) {
         return new BookSummary(entry.bookId(), entry.isbn(), entry.title(),
                 entry.authors() == null ? List.of() : entry.authors(),
                 entry.publisher(), entry.publicationYear(), entry.language(),

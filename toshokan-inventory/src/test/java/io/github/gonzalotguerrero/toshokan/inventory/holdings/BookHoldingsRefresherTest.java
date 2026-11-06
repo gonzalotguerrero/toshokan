@@ -78,6 +78,31 @@ class BookHoldingsRefresherTest {
         verify(holdings, never()).save(any());
     }
 
+    @Test
+    void leavesWithdrawnCopiesOutOfTheCounts() {
+        when(copies.findByBookId(DUNE.bookId()))
+                .thenReturn(List.of(copy(BookCopyStatus.AVAILABLE), copy(BookCopyStatus.WITHDRAWN),
+                        copy(BookCopyStatus.DAMAGED)));
+
+        refresher.refresh(DUNE);
+
+        ArgumentCaptor<BookHoldings> saved = ArgumentCaptor.forClass(BookHoldings.class);
+        verify(holdings).save(saved.capture());
+        assertThat(saved.getValue().totalCopies()).isEqualTo(2);
+        assertThat(saved.getValue().availableCopies()).isEqualTo(1);
+    }
+
+    @Test
+    void removesTheBookFromTheHoldingsWhenEveryCopyIsWithdrawn() {
+        when(copies.findByBookId(DUNE.bookId()))
+                .thenReturn(List.of(copy(BookCopyStatus.WITHDRAWN), copy(BookCopyStatus.WITHDRAWN)));
+
+        refresher.refresh(DUNE);
+
+        verify(holdings).deleteById(any(MapId.class));
+        verify(holdings, never()).save(any());
+    }
+
     private static BookCopy copy(BookCopyStatus status) {
         return new BookCopy(DUNE.bookId(), UUID.randomUUID(), "LIB-" + UUID.randomUUID(), status, Instant.now());
     }

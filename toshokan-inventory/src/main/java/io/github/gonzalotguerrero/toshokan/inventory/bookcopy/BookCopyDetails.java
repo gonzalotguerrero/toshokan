@@ -12,7 +12,7 @@ public record BookCopyDetails(
         Instant addedAt
 ) {
 
-    static BookCopyDetails from(BookCopy copy) {
+    public static BookCopyDetails from(BookCopy copy) {
         return new BookCopyDetails(copy.bookCopyId(), copy.bookId(), copy.inventoryNumber(), copy.status(),
                 copy.addedAt());
     }

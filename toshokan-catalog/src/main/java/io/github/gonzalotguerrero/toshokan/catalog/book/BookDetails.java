@@ -20,7 +20,7 @@ public record BookDetails(
         Instant addedAt
 ) {
 
-    static BookDetails from(Book book) {
+    public static BookDetails from(Book book) {
         return new BookDetails(book.bookId(), book.isbn(), book.title(), book.authors(), book.publisher(),
                 book.publicationYear(), book.language(), book.genres(), book.addedAt());
     }

@@ -11,6 +11,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.data.cassandra.core.CassandraOperations;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.client.RestTestClient;
@@ -22,8 +23,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
 
 /**
- * Creates a book, adds copies to it and checks that {@code GET /books} shows it with the right counts. It's
- * the path the holdings depend on, end to end.
+ * Adds, changes and withdraws copies through the API and checks that {@code GET /books} keeps showing the
+ * right counts. It's the path the holdings depend on, end to end.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
@@ -107,6 +108,94 @@ class BookCopyApiIntegrationTest {
                 .expectStatus().isNotFound();
     }
 
+    @Test
+    void listsTheCopiesOfABook() {
+        BookDetails dune = createBook("Dune");
+        BookCopyDetails second = addBookCopy(dune.bookId(), "LIB-000002");
+        BookCopyDetails first = addBookCopy(dune.bookId(), "LIB-000001");
+
+        assertThat(listBookCopies(dune.bookId())).containsExactly(first, second);
+    }
+
+    @Test
+    void aDamagedCopyStillCountsButIsNotAvailable() {
+        BookDetails dune = createBook("Dune");
+        BookCopyDetails copy = addBookCopy(dune.bookId(), "LIB-000001");
+        addBookCopy(dune.bookId(), "LIB-000002");
+
+        BookCopyDetails damaged = changeStatus(copy, "DAMAGED")
+                .expectStatus().isOk()
+                .expectBody(BookCopyDetails.class).returnResult().getResponseBody();
+
+        assertThat(damaged.status()).isEqualTo(BookCopyStatus.DAMAGED);
+        assertThat(listBooks()).singleElement().satisfies(book -> {
+            assertThat(book.totalCopies()).isEqualTo(2);
+            assertThat(book.availableCopies()).isEqualTo(1);
+        });
+    }
+
+    @Test
+    void aCopyCannotBeMarkedAsLentByHand() {
+        BookDetails dune = createBook("Dune");
+        BookCopyDetails copy = addBookCopy(dune.bookId(), "LIB-000001");
+
+        changeStatus(copy, "LENT").expectStatus().isEqualTo(409);
+
+        assertThat(listBookCopies(dune.bookId())).singleElement()
+                .extracting(BookCopyDetails::status).isEqualTo(BookCopyStatus.AVAILABLE);
+    }
+
+    @Test
+    void deletingACopyWithdrawsItButKeepsItsRecord() {
+        BookDetails dune = createBook("Dune");
+        BookCopyDetails copy = addBookCopy(dune.bookId(), "LIB-000001");
+        addBookCopy(dune.bookId(), "LIB-000002");
+
+        withdraw(copy).expectStatus().isNoContent();
+
+        assertThat(listBookCopies(dune.bookId()))
+                .extracting(BookCopyDetails::inventoryNumber, BookCopyDetails::status)
+                .containsExactly(tuple("LIB-000001", BookCopyStatus.WITHDRAWN),
+                        tuple("LIB-000002", BookCopyStatus.AVAILABLE));
+        assertThat(listBooks()).singleElement().satisfies(book -> {
+            assertThat(book.totalCopies()).isEqualTo(1);
+            assertThat(book.availableCopies()).isEqualTo(1);
+        });
+    }
+
+    @Test
+    void withdrawingTheLastCopyTakesTheBookOutOfTheHoldings() {
+        BookDetails dune = createBook("Dune");
+        BookCopyDetails copy = addBookCopy(dune.bookId(), "LIB-000001");
+
+        withdraw(copy).expectStatus().isNoContent();
+
+        assertThat(listBooks()).isEmpty();
+    }
+
+    @Test
+    void aWithdrawnCopyCanBePutBackOnTheShelf() {
+        BookDetails dune = createBook("Dune");
+        BookCopyDetails copy = addBookCopy(dune.bookId(), "LIB-000001");
+        withdraw(copy).expectStatus().isNoContent();
+
+        changeStatus(copy, "AVAILABLE").expectStatus().isOk();
+
+        assertThat(listBooks()).singleElement().satisfies(book -> {
+            assertThat(book.totalCopies()).isEqualTo(1);
+            assertThat(book.availableCopies()).isEqualTo(1);
+        });
+    }
+
+    @Test
+    void answersAnUnknownCopyWithNotFound() {
+        BookDetails dune = createBook("Dune");
+
+        client.delete().uri("/api/v1/books/{bookId}/copies/{bookCopyId}", dune.bookId(), UUID.randomUUID())
+                .exchange()
+                .expectStatus().isNotFound();
+    }
+
     private BookDetails createBook(String title) {
         return client.post().uri("/api/v1/books").contentType(MediaType.APPLICATION_JSON)
                 .body("""
@@ -129,6 +218,27 @@ class BookCopyApiIntegrationTest {
                 .expectBody(BookCopyDetails.class)
                 .returnResult()
                 .getResponseBody();
+    }
+
+    private List<BookCopyDetails> listBookCopies(UUID bookId) {
+        return client.get().uri("/api/v1/books/{bookId}/copies", bookId).exchange()
+                .expectStatus().isOk()
+                .expectBody(new ParameterizedTypeReference<List<BookCopyDetails>>() {
+                })
+                .returnResult()
+                .getResponseBody();
+    }
+
+    private RestTestClient.ResponseSpec changeStatus(BookCopyDetails copy, String status) {
+        return client.patch().uri("/api/v1/books/{bookId}/copies/{bookCopyId}", copy.bookId(), copy.bookCopyId())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body("{\"status\": \"" + status + "\"}")
+                .exchange();
+    }
+
+    private RestTestClient.ResponseSpec withdraw(BookCopyDetails copy) {
+        return client.delete().uri("/api/v1/books/{bookId}/copies/{bookCopyId}", copy.bookId(), copy.bookCopyId())
+                .exchange();
     }
 
     private List<BookSummary> listBooks() {

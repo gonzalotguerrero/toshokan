@@ -22,7 +22,7 @@ final class BookTextNormalizer {
     }
 
     /** Upper-cases the first letter and lower-cases the rest, so "science FICTION" becomes "Science fiction". */
-    static String capitalize(String value) {
+    public static String capitalize(String value) {
         String text = WHITESPACE.matcher(value.strip()).replaceAll(" ");
         if (text.isEmpty()) {
             return text;
@@ -37,7 +37,7 @@ final class BookTextNormalizer {
      * Cassandra stores sets sorted anyway, and this way the create response already matches what later reads
      * return.
      */
-    static Set<String> normalizeGenres(Collection<String> genres) {
+    public static Set<String> normalizeGenres(Collection<String> genres) {
         Set<String> normalized = new TreeSet<>();
         for (String genre : genres) {
             normalized.add(capitalize(genre));
@@ -49,7 +49,7 @@ final class BookTextNormalizer {
      * Removes hyphens and spaces, so "978-0-441-01359-3" and "9780441013593" are treated as the same ISBN.
      * A missing ISBN is allowed and comes back as {@code null}.
      */
-    static String normalizeIsbn(String isbn) {
+    public static String normalizeIsbn(String isbn) {
         if (isbn == null || isbn.isBlank()) {
             return null;
         }
@@ -61,7 +61,7 @@ final class BookTextNormalizer {
     }
 
     /** Trims optional text. A blank value counts as not given. */
-    static String blankToNull(String value) {
+    public static String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value.strip();
     }
 }

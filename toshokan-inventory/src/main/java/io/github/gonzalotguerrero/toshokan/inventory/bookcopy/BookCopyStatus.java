@@ -1,8 +1,11 @@
 package io.github.gonzalotguerrero.toshokan.inventory.bookcopy;
 
 /**
- * Where a copy is right now. The holdings only count {@link #AVAILABLE} copies as on the shelf. New copies
- * always start out available; the other statuses come into play with lending and copy management.
+ * Where a copy is right now. New copies always start out available.
+ *
+ * <p>In the holdings, only {@link #AVAILABLE} copies count as on the shelf, and {@link #WITHDRAWN} ones don't
+ * count at all. Withdrawing is how a copy gets deleted while we still keep its record. {@link #LENT} can't be
+ * set or cleared by hand; only lending and returning will do that, so a copy is never lent without a loan.
  */
 public enum BookCopyStatus {
     AVAILABLE,

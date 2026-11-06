@@ -24,4 +24,8 @@ public record BookCopy(
         @Column("status") BookCopyStatus status,
         @Column("added_at") Instant addedAt
 ) {
+
+    public BookCopy withStatus(BookCopyStatus newStatus) {
+        return new BookCopy(bookId, bookCopyId, inventoryNumber, newStatus, addedAt);
+    }
 }

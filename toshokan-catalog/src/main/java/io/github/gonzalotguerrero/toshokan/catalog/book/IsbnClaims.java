@@ -17,17 +17,17 @@ class IsbnClaims {
 
     private final CassandraOperations cassandra;
 
-    IsbnClaims(CassandraOperations cassandra) {
+    public IsbnClaims(CassandraOperations cassandra) {
         this.cassandra = cassandra;
     }
 
     /** Returns {@code false} if another book already has this ISBN. */
-    boolean claim(String isbn, UUID bookId) {
+    public boolean claim(String isbn, UUID bookId) {
         return cassandra.insert(new BookByIsbn(isbn, bookId), IF_NOT_EXISTS).wasApplied();
     }
 
     /** Frees the ISBN again. Used when the claim worked but saving the book didn't. */
-    void release(String isbn) {
+    public void release(String isbn) {
         cassandra.deleteById(isbn, BookByIsbn.class);
     }
 }

@@ -33,8 +33,11 @@ public class BookHoldingsRefresher {
     }
 
     public void refresh(BookDetails book) {
-        List<BookCopy> bookCopies = copies.findByBookId(book.bookId());
-        if (bookCopies.isEmpty()) {
+        // Withdrawn copies are kept only as a record, so they don't count as something the library holds
+        List<BookCopy> heldCopies = copies.findByBookId(book.bookId()).stream()
+                .filter(copy -> copy.status() != BookCopyStatus.WITHDRAWN)
+                .toList();
+        if (heldCopies.isEmpty()) {
             // No copies left, so the book drops out of the holdings
             holdings.deleteById(BasicMapId.id("holdingsPartition", BookHoldings.HOLDINGS_PARTITION)
                     .with("sortTitle", BookHoldings.sortKeyFor(book.title()))
@@ -42,11 +45,12 @@ public class BookHoldingsRefresher {
             log.debug("Removed book {} from the holdings", book.bookId());
             return;
         }
-        int available = (int) bookCopies.stream()
+        int available = (int) heldCopies.stream()
                 .filter(copy -> copy.status() == BookCopyStatus.AVAILABLE)
                 .count();
         holdings.save(BookHoldings.of(book.bookId(), book.isbn(), book.title(), book.authors(), book.publisher(),
-                book.publicationYear(), book.language(), book.genres(), bookCopies.size(), available));
-        log.debug("Holdings for book {} now show {} copies, {} available", book.bookId(), bookCopies.size(), available);
+                book.publicationYear(), book.language(), book.genres(), heldCopies.size(), available));
+        log.debug("Holdings for book {} now show {} copies, {} available", book.bookId(), heldCopies.size(),
+                available);
     }
 }

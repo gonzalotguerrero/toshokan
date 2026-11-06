@@ -17,18 +17,18 @@ class InventoryNumberClaims {
 
     private final CassandraOperations cassandra;
 
-    InventoryNumberClaims(CassandraOperations cassandra) {
+    public InventoryNumberClaims(CassandraOperations cassandra) {
         this.cassandra = cassandra;
     }
 
     /** Returns {@code false} if another copy already has this number. */
-    boolean claim(String inventoryNumber, UUID bookId, UUID bookCopyId) {
+    public boolean claim(String inventoryNumber, UUID bookId, UUID bookCopyId) {
         return cassandra.insert(new BookCopyByInventoryNumber(inventoryNumber, bookId, bookCopyId), IF_NOT_EXISTS)
                 .wasApplied();
     }
 
     /** Frees the number again. Used when the claim worked but saving the copy didn't. */
-    void release(String inventoryNumber) {
+    public void release(String inventoryNumber) {
         cassandra.deleteById(inventoryNumber, BookCopyByInventoryNumber.class);
     }
 }

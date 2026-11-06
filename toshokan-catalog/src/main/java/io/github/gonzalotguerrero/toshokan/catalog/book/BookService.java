@@ -35,7 +35,7 @@ public class BookService {
     }
 
     /** Tests use this to fix the clock, so the "no future years" check gives the same result whenever they run. */
-    BookService(BookRepository books, IsbnClaims isbnClaims, Clock clock) {
+    public BookService(BookRepository books, IsbnClaims isbnClaims, Clock clock) {
         this.books = books;
         this.isbnClaims = isbnClaims;
         this.clock = clock;
