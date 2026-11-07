@@ -27,7 +27,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Runs the loan slot writes against a real Cassandra. The lending tests rarely get as far as giving a slot back,
  * because a lend that can't work is usually refused before its slot is reserved, so the statements are checked here.
  */
-@SpringBootTest
+// No HTTP calls here, but the API tests' setup lets this reuse their context and Cassandra
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
 class MemberLoanSlotsIntegrationTest {
 

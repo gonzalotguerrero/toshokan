@@ -7,8 +7,9 @@ import org.testcontainers.cassandra.CassandraContainer;
 
 /**
  * Spins up a throwaway Cassandra 4.1 for the tests (same version as compose.yaml) and points the app at it.
- * Spring caches the test context, so every test class that imports this shares one container instead of
- * starting its own.
+ * The container belongs to the Spring context, so test classes only share it when they also share a cached
+ * context. Any difference in setup, even just the {@code webEnvironment}, builds a new context and starts another
+ * Cassandra. That's why every integration test uses the same {@code @SpringBootTest(webEnvironment = RANDOM_PORT)}.
  */
 @TestConfiguration(proxyBeanMethods = false)
 public class TestcontainersConfiguration {
