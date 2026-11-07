@@ -1,0 +1,26 @@
+# Runs every test, unit and integration, on each push to any branch
+name: Build
+
+on:
+  push:
+
+# A newer push to the same branch makes the run for the older commit pointless
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: '21'
+          cache: maven
+
+      # The integration tests start Cassandra through Testcontainers, using the runner's Docker
+      - name: Run the tests
+        run: mvn -B verify

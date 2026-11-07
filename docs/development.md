@@ -9,6 +9,9 @@ mvn verify
 This runs each module's unit tests, then the integration tests in `toshokan-app`. The integration tests start a
 real Cassandra through Testcontainers, so Docker has to be running.
 
+GitHub Actions runs the same `mvn verify` on every push (see `.github/workflows/build.yml`). Failing tests show
+up in the run's log.
+
 To run a single integration test:
 
 ```shell
