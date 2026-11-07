@@ -21,13 +21,12 @@ Each Cassandra table is designed around a query, so the same data often lives in
 | `book_copies_by_book`             | `book_id` → `book_copy_id`                        | A title's copies and their current loans |
 | `book_copies_by_inventory_number` | `inventory_number`                                | Number uniqueness, and the copy behind a label |
 | `book_holdings`                   | one partition → `sort_title`, `book_id`           | `GET /books`                          |
-| `members`                         | `member_id`                                       | A member by id                        |
+| `members`                         | `member_id`                                       | A member by id, with their loan slots |
 | `members_by_card_number`          | `card_number`                                     | Card uniqueness, and the member behind a card |
 | `member_directory`                | one partition → `sort_name`, `member_id`          | The order of the member list, by name |
 | `loans_by_copy`                   | `book_copy_id` → `lent_at` desc, `loan_id`        | A copy's loan history                 |
 | `loans_by_member`                 | `member_id` → `lent_at` desc, `loan_id`           | A member's loan history               |
 | `book_locks`                      | `book_id`                                         | The per-book lock                     |
-| `member_lending_locks`            | `member_id`                                       | The per-member lock                   |
 
 `book_copies_by_book` also has secondary indexes on `member_id` (a member's current loans) and `status` (the
 overdue list). The holdings and the member directory each sit in a single partition. That's fine for one
@@ -54,10 +53,11 @@ The rule is that no row's correctness may depend on a later write that might nev
 - **A copy is the truth about its own loan.** Its status and current loan always change together, in one
   conditional `UPDATE ... IF`. Every write to `book_copies_by_book` is conditional, because conditional and
   plain writes are timestamped by different clocks, and mixing them on one row can lose updates.
-- **Short locks for rules that span rows.** "At most 3 books per member" can't be checked on a single copy, so
-  lending and deactivating a member take a per-member lock. Deleting a book, adding a copy, and putting a copy
-  back from withdrawn take a per-book lock. Locks are `IF NOT EXISTS` rows with a 10-second TTL, so a lock
-  that never gets released clears itself.
+- **The member decides the member rules.** "At most 3 books per member" can't be checked on any one copy, so
+  every lend first reserves a loan slot on the member with `IF version = ?` (see [Loan slots](#loan-slots)).
+  Deactivating a member is the same kind of write, so a lend and a deactivation can't both get through.
+- **A short lock for deleting a book.** Deleting a book, adding a copy, and putting a copy back from withdrawn
+  take a per-book lock (see [The book lock](#the-book-lock)).
 
 ### Loan history
 
@@ -70,6 +70,34 @@ against the copy when it's read:
 - Otherwise, the row comes from a lend that never went through, and it's left out.
 
 Rows left out this way are why a history page can have fewer items than asked for.
+
+### Loan slots
+
+`members.loan_slots` maps a loan id to the time it was reserved. A lend goes like this:
+
+1. Read the member, then the copies lent to them. The order matters: a lend that reserves a slot after the read
+   changes the version, so this one's reservation fails.
+2. Count what's taken: every copy lent to the member, plus the slots that are still pending.
+3. Check the rules (active, nothing overdue, under the limit), then reserve a slot with `IF version = ?`. The new
+   slot list keeps only the pending slots, so finished ones are dropped along the way.
+4. Write the loan history, then lend the copy.
+
+A slot is pending unless a copy shows its loan (it already counts through the copy), the history says the loan was
+returned, or it's more than 10 minutes old (a lend whose copy write hasn't landed by then never will). If the lend
+certainly failed, its slot is removed straight away. After a timeout it's kept, because the copy may still end up
+lent, and it stops counting once it's 10 minutes old. Returns and renewals don't touch the member at all.
+
+Any change to a member also changes the version, so a lend that overlaps with, say, an email change gets a 409 and
+has to be retried.
+
+### The book lock
+
+The lock is an `IF NOT EXISTS` row with a 10-second TTL, so a lock that never gets released clears itself. The
+TTL also means a request that stalls (a long GC pause, a slow Cassandra) can lose the lock without knowing it. To
+make that unlikely, the write that decides the outcome only starts if less than 5 seconds have passed since the
+lock was taken; otherwise the request gets a 409 and nothing is saved. This narrows the gap but doesn't close it:
+a pause between that check and the write could still let a second request in. Deletes are rare and done by staff,
+so this was judged good enough.
 
 ### Member directory
 

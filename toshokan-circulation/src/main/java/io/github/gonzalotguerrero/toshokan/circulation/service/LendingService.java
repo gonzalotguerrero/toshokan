@@ -10,15 +10,19 @@ import io.github.gonzalotguerrero.toshokan.circulation.dto.RenewalRequest;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.ReturnRequest;
 import io.github.gonzalotguerrero.toshokan.circulation.model.LoanByCopy;
 import io.github.gonzalotguerrero.toshokan.circulation.repository.LoanHistoryWriter;
-import io.github.gonzalotguerrero.toshokan.circulation.repository.MemberLendingLocks;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookCopyDetails;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookCopyLoan;
+import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopyStatus;
 import io.github.gonzalotguerrero.toshokan.inventory.service.BookCopyService;
 import io.github.gonzalotguerrero.toshokan.members.dto.MemberDetails;
+import io.github.gonzalotguerrero.toshokan.members.dto.MemberLendingState;
 import io.github.gonzalotguerrero.toshokan.members.model.MemberStatus;
 import io.github.gonzalotguerrero.toshokan.members.service.MemberService;
+import io.github.gonzalotguerrero.toshokan.shared.cassandra.WriteOutcomes;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.ConflictException;
 import io.github.gonzalotguerrero.toshokan.shared.exceptions.NotFoundException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Clock;
@@ -39,24 +43,30 @@ import java.util.UUID;
  * <p>Lends and returns are recorded in the loan history first and only then applied to the copy. If the second
  * step fails, the history row is left behind, but {@link LoanHistoryService} checks every row against the copy, so
  * a row like that never shows up as something that happened.
+ *
+ * <p>The loan limit and the other member rules are decided by reserving a loan slot on the member before anything
+ * else is written (see {@link MemberLendingState}). If two lends for the same member race, only one reservation
+ * gets in, and the other request gets a conflict.
  */
 @Service
 public class LendingService {
 
+    private static final Logger log = LoggerFactory.getLogger(LendingService.class);
+
     private final MemberService members;
     private final BookService books;
     private final BookCopyService copies;
-    private final MemberLendingLocks locks;
+    private final LoanSlots loanSlots;
     private final LoanHistoryWriter history;
     private final LendingProperties rules;
     private final Clock clock;
 
     public LendingService(MemberService members, BookService books, BookCopyService copies,
-                          MemberLendingLocks locks, LoanHistoryWriter history, LendingProperties rules, Clock clock) {
+                          LoanSlots loanSlots, LoanHistoryWriter history, LendingProperties rules, Clock clock) {
         this.members = members;
         this.books = books;
         this.copies = copies;
-        this.locks = locks;
+        this.loanSlots = loanSlots;
         this.history = history;
         this.rules = rules;
         this.clock = clock;
@@ -72,31 +82,61 @@ public class LendingService {
                 .orElseThrow(() -> new NotFoundException("No member with card number " + cardNumber));
         BookCopyDetails copy = requireCopy(request.inventoryNumber());
 
-        return locks.whileLocked(member.memberId(), () -> {
-            // Read the member again now that we hold the lock, in case they were deactivated a moment ago
-            MemberDetails current = members.getMember(member.memberId());
-            if (current.status() != MemberStatus.ACTIVE) {
-                throw new ConflictException("Member " + cardNumber + " is inactive and can't borrow books");
-            }
-            List<BookCopyDetails> borrowed = currentLoans(member.memberId());
-            Optional<BookCopyDetails> late = borrowed.stream().filter(lent -> lent.loan().overdue()).findFirst();
-            if (late.isPresent()) {
-                throw new ConflictException("Member " + cardNumber + " has an overdue book ("
-                        + late.get().inventoryNumber() + ") and can't borrow more until it's returned");
-            }
-            if (borrowed.size() >= rules.maxActiveLoans()) {
-                throw new ConflictException("Member " + cardNumber + " already has " + books(borrowed.size())
-                        + " out, which is the most allowed");
-            }
-            LocalDate dueDate = today().plus(rules.loanPeriod());
-            UUID loanId = UUID.randomUUID();
-            // Cassandra keeps timestamps to the millisecond, so the copy and the history get the same value
-            Instant lentAt = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+        // The member has to be read before their loans: any lend that reserves a slot after this read changes the
+        // version, so our own reservation below fails instead of going over the limit
+        MemberLendingState state = members.lendingState(member.memberId());
+        if (state.status() != MemberStatus.ACTIVE) {
+            throw new ConflictException("Member " + cardNumber + " is inactive and can't borrow books");
+        }
+        List<BookCopyDetails> borrowed = currentLoans(member.memberId());
+        Optional<BookCopyDetails> late = borrowed.stream().filter(lent -> lent.loan().overdue()).findFirst();
+        if (late.isPresent()) {
+            throw new ConflictException("Member " + cardNumber + " has an overdue book ("
+                    + late.get().inventoryNumber() + ") and can't borrow more until it's returned");
+        }
+        Map<UUID, Instant> pending = loanSlots.pending(state, borrowed);
+        int taken = borrowed.size() + pending.size();
+        if (taken >= rules.maxActiveLoans()) {
+            throw new ConflictException("Member " + cardNumber + " already has " + books(taken)
+                    + " out, which is the most allowed");
+        }
+        // The copy's own write checks this again, but checking now saves using up a slot on a lend that can't work
+        if (copy.status() != BookCopyStatus.AVAILABLE) {
+            throw new ConflictException("Book copy " + copy.inventoryNumber() + " can't be lent because it's "
+                    + copy.status());
+        }
+
+        LocalDate dueDate = today().plus(rules.loanPeriod());
+        UUID loanId = UUID.randomUUID();
+        // Cassandra keeps timestamps to the millisecond, so the slot, the copy and the history get the same value
+        Instant lentAt = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+        if (!members.reserveLoanSlot(state, pending, loanId, lentAt)) {
+            throw new ConflictException("Member " + cardNumber
+                    + " was changed by someone else at the same time. Try again");
+        }
+        try {
             history.save(new LoanByCopy(copy.bookCopyId(), lentAt, loanId, copy.bookId(), copy.inventoryNumber(),
                     member.memberId(), dueDate, 0, null));
+        } catch (RuntimeException e) {
+            // The copy hasn't been touched, so the lend can't have happened whatever became of this write
+            releaseSlot(member.memberId(), loanId);
+            throw e;
+        }
+        try {
             return LoanDetails.from(copies.markLent(copy.bookId(), copy.bookCopyId(), member.memberId(), loanId,
                     lentAt, dueDate));
-        });
+        } catch (ConflictException | NotFoundException e) {
+            // Refused before anything was written to the copy
+            releaseSlot(member.memberId(), loanId);
+            throw e;
+        } catch (RuntimeException e) {
+            // After a timeout the copy may still end up lent, so the slot has to stay. If the lend never lands,
+            // the slot stops counting once it's older than LoanSlots.PENDING_FOR
+            if (WriteOutcomes.definitelyNotApplied(e)) {
+                releaseSlot(member.memberId(), loanId);
+            }
+            throw e;
+        }
     }
 
     /** Takes a copy back. Being late doesn't stop a return, it's what fixes it. */
@@ -168,6 +208,15 @@ public class LendingService {
 
     private List<BookCopyDetails> currentLoans(UUID memberId) {
         return copies.findCopiesLentTo(memberId).stream().filter(copy -> copy.loan() != null).toList();
+    }
+
+    private void releaseSlot(UUID memberId, UUID loanId) {
+        try {
+            members.releaseLoanSlot(memberId, loanId);
+        } catch (RuntimeException e) {
+            // The lend has failed already. The slot stops counting on its own once it's old enough
+            log.warn("Couldn't release loan slot {} of member {}", loanId, memberId, e);
+        }
     }
 
     private BookCopyDetails requireCopy(String inventoryNumber) {

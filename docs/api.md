@@ -98,8 +98,8 @@ Errors come back as [Problem Details](https://www.rfc-editor.org/rfc/rfc9457):
 | 404    | The book, copy or member doesn't exist                                |
 | 409    | A rule says no: a duplicate ISBN, a copy that's already out, a book that still has copies |
 
-A 409 that says something is being changed "at the same time" or "right now" means another request got there
-first. Trying again is safe.
+A 409 that says something is being changed "at the same time" or "right now", or that a change "took too long",
+means another request got in the way or the server was slow. Nothing was saved, and trying again is safe.
 
 A 500 from a create (book, copy or member) can mean Cassandra timed out and the write may still land. The
 number it claimed stays taken until either the record appears or 10 minutes pass, so retrying straight away can

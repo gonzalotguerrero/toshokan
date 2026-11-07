@@ -33,7 +33,7 @@ public class CopyCheckingDeletionGuard implements BookDeletionGuard {
 
     @Override
     public void runGuarded(BookDetails book, Runnable deletion) {
-        locks.whileLocked(book.bookId(), () -> {
+        locks.whileLocked(book.bookId(), lease -> {
             long held = copies.findByBookId(book.bookId()).stream()
                     .filter(copy -> copy.status() != BookCopyStatus.WITHDRAWN)
                     .count();
@@ -44,6 +44,7 @@ public class CopyCheckingDeletionGuard implements BookDeletionGuard {
                 throw new ConflictException("Book " + book.bookId() + " still has " + copiesLeft
                         + " to be withdrawn before the book can be deleted");
             }
+            lease.ensureStillHeld();
             deletion.run();
             removeFromHoldings(book);
             return null;

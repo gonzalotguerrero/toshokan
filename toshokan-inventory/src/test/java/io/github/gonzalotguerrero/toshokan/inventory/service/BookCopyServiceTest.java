@@ -10,6 +10,7 @@ import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopyByInventoryNu
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyByInventoryNumberRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyStatusChanges;
+import io.github.gonzalotguerrero.toshokan.inventory.repository.BookLockLease;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookLocks;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.InventoryNumberClaims;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.NewBookCopyInserter;
@@ -33,7 +34,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Supplier;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -112,13 +113,27 @@ class BookCopyServiceTest {
     @Test
     void failsWithNotFoundForAnUnknownBook() {
         UUID bookId = UUID.randomUUID();
-        when(locks.whileLocked(eq(bookId), any())).thenAnswer(call -> call.<Supplier<?>>getArgument(1).get());
+        when(locks.whileLocked(eq(bookId), any())).thenAnswer(call -> runWithLease(call.getArgument(1), true));
         when(books.findBook(bookId)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.addBookCopy(bookId, new AddBookCopyRequest("LIB-000123")))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessage("No book with id " + bookId);
         verifyNoInteractions(copies, inventoryNumbers, holdingsRefresher);
+    }
+
+    @Test
+    void givesTheNumberBackAndSavesNothingIfTheLockWasHeldTooLong() {
+        givenTheLockIsHeldTooLong();
+        when(books.findBook(DUNE.bookId())).thenReturn(Optional.of(DUNE));
+        when(inventoryNumbers.claim(eq("LIB-000123"), eq(DUNE.bookId()), any())).thenReturn(true);
+
+        assertThatThrownBy(() -> service.addBookCopy(DUNE.bookId(), new AddBookCopyRequest("LIB-000123")))
+                .isInstanceOf(ConflictException.class)
+                .hasMessage("Changing book " + DUNE.bookId() + " took too long and was stopped before it was saved."
+                        + " Try again");
+        verify(inventoryNumbers).release(eq("LIB-000123"), eq(DUNE.bookId()), any());
+        verifyNoInteractions(newCopies, holdingsRefresher);
     }
 
     @Test
@@ -339,6 +354,17 @@ class BookCopyServiceTest {
     }
 
     @Test
+    void doesNotBringACopyBackIfTheLockWasHeldTooLong() {
+        BookCopy copy = copy("LIB-000001", BookCopyStatus.WITHDRAWN);
+        givenExistingCopy(copy);
+        givenTheLockIsHeldTooLong();
+
+        assertThatThrownBy(() -> service.changeStatus(DUNE.bookId(), copy.bookCopyId(), BookCopyStatus.AVAILABLE))
+                .isInstanceOf(ConflictException.class);
+        verifyNoInteractions(statusChanges);
+    }
+
+    @Test
     void otherStatusChangesDoNotNeedTheLock() {
         BookCopy copy = copy("LIB-000001", BookCopyStatus.AVAILABLE);
         givenExistingCopy(copy);
@@ -529,7 +555,17 @@ class BookCopyServiceTest {
 
     /** Makes the lock behave like nobody else is working on the book: it just runs the work. */
     private void givenTheLockIsFree() {
-        when(locks.whileLocked(eq(DUNE.bookId()), any())).thenAnswer(call -> call.<Supplier<?>>getArgument(1).get());
+        when(locks.whileLocked(eq(DUNE.bookId()), any())).thenAnswer(call -> runWithLease(call.getArgument(1), true));
+    }
+
+    /** Runs the work as if the request had stalled after taking the lock, so the lease is no longer safe. */
+    private void givenTheLockIsHeldTooLong() {
+        when(locks.whileLocked(eq(DUNE.bookId()), any())).thenAnswer(call -> runWithLease(call.getArgument(1), false));
+    }
+
+    private static Object runWithLease(Function<BookLockLease, ?> work, boolean stillSafe) {
+        Instant safeUntil = stillSafe ? CLOCK.instant().plusSeconds(5) : CLOCK.instant().minusSeconds(1);
+        return work.apply(new BookLockLease(DUNE.bookId(), safeUntil, CLOCK));
     }
 
     private void givenExistingCopy(BookCopy copy) {

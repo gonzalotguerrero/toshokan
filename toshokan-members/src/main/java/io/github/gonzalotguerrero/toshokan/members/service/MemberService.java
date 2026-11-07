@@ -2,6 +2,7 @@ package io.github.gonzalotguerrero.toshokan.members.service;
 
 import io.github.gonzalotguerrero.toshokan.members.dto.CreateMemberRequest;
 import io.github.gonzalotguerrero.toshokan.members.dto.MemberDetails;
+import io.github.gonzalotguerrero.toshokan.members.dto.MemberLendingState;
 import io.github.gonzalotguerrero.toshokan.members.dto.UpdateMemberRequest;
 import io.github.gonzalotguerrero.toshokan.members.model.Member;
 import io.github.gonzalotguerrero.toshokan.members.model.MemberDirectoryEntry;
@@ -28,6 +29,8 @@ import org.springframework.stereotype.Service;
 
 import java.nio.ByteBuffer;
 import java.time.Clock;
+import java.time.Instant;
+import java.util.HashMap;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Locale;
@@ -189,10 +192,9 @@ public class MemberService {
         }
         if (current.status() == MemberStatus.ACTIVE && status == MemberStatus.INACTIVE) {
             // Setting the status to INACTIVE is a deactivation too, so it gets the same loan checks as DELETE
-            deactivationGuard.runGuarded(memberId, () -> save(current, updated));
-        } else {
-            save(current, updated);
+            deactivationGuard.checkCanDeactivate(MemberLendingState.from(current));
         }
+        save(current, updated);
         log.info("Updated member {}", memberId);
         return MemberDetails.from(updated);
     }
@@ -208,8 +210,31 @@ public class MemberService {
             return;
         }
         Member updated = current.withStatus(MemberStatus.INACTIVE);
-        deactivationGuard.runGuarded(memberId, () -> save(current, updated));
+        deactivationGuard.checkCanDeactivate(MemberLendingState.from(current));
+        save(current, updated);
         log.info("Deactivated member {}", memberId);
+    }
+
+    /** Used by circulation to check a lend or a deactivation against the member as they are now. */
+    public MemberLendingState lendingState(UUID memberId) {
+        return MemberLendingState.from(requireMember(memberId));
+    }
+
+    /**
+     * Reserves a slot for a new loan, as long as the member hasn't changed since {@code seen} was read. The slots
+     * become {@code keptSlots} plus the new one, which is how slots that no longer matter get dropped. Returns
+     * {@code false} if the member changed, in which case nothing was written.
+     */
+    public boolean reserveLoanSlot(MemberLendingState seen, Map<UUID, Instant> keptSlots, UUID loanId,
+                                   Instant reservedAt) {
+        Map<UUID, Instant> slots = new HashMap<>(keptSlots);
+        slots.put(loanId, reservedAt);
+        return writer.replaceLoanSlots(seen.memberId(), seen.version(), slots);
+    }
+
+    /** Gives a slot back after a lend that certainly didn't happen, so it doesn't count against the member. */
+    public void releaseLoanSlot(UUID memberId, UUID loanId) {
+        writer.removeLoanSlot(memberId, loanId);
     }
 
     /**

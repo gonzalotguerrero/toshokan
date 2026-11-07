@@ -6,6 +6,13 @@ import org.springframework.data.cassandra.core.CassandraOperations;
 import org.springframework.data.cassandra.core.InsertOptions;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
 /**
  * Every write to members goes through here.
  *
@@ -37,18 +44,42 @@ public class MemberWriter {
 
     /**
      * Replaces {@code current} with {@code updated}, as long as nobody changed the member since {@code current} was
-     * read. Returns {@code false} if someone did, in which case nothing changed.
+     * read. Returns {@code false} if someone did, in which case nothing changed. Loan slots are left alone.
      */
     public boolean update(Member current, Member updated) {
+        return updateIfVersion(current.memberId(), current.version(),
+                "full_name = ?, email = ?, phone = ?, status = ?",
+                updated.fullName(), updated.email(), updated.phone(), updated.status().name());
+    }
+
+    /**
+     * Replaces the member's loan slots with {@code slots}, as long as the member is still at {@code seenVersion}.
+     * Returns {@code false} if they aren't, in which case nothing changed.
+     */
+    public boolean replaceLoanSlots(UUID memberId, Long seenVersion, Map<UUID, Instant> slots) {
+        return updateIfVersion(memberId, seenVersion, "loan_slots = ?", slots);
+    }
+
+    /**
+     * Removes one loan slot. It's conditional on the member existing only because every write here has to be
+     * conditional; it doesn't need the version, since dropping a slot can only ever let fewer lends through.
+     */
+    public void removeLoanSlot(UUID memberId, UUID loanId) {
+        cassandra.getCqlOperations().execute("DELETE loan_slots[?] FROM members WHERE member_id = ? IF EXISTS",
+                loanId, memberId);
+    }
+
+    /** Runs {@code UPDATE members SET <assignments>, version = <next> WHERE member_id = ? IF version = <seen>}. */
+    private boolean updateIfVersion(UUID memberId, Long seenVersion, String assignments, Object... assignedValues) {
         // Members saved before versions existed have no version at all, and CQL compares that with "= null"
-        String versionCondition = current.version() == null ? "IF version = null" : "IF version = ?";
-        String cql = "UPDATE members SET full_name = ?, email = ?, phone = ?, status = ?, version = ?"
-                + " WHERE member_id = ? " + versionCondition;
-        Object[] values = current.version() == null
-                ? new Object[]{updated.fullName(), updated.email(), updated.phone(), updated.status().name(),
-                        current.nextVersion(), current.memberId()}
-                : new Object[]{updated.fullName(), updated.email(), updated.phone(), updated.status().name(),
-                        current.nextVersion(), current.memberId(), current.version()};
-        return cassandra.getCqlOperations().execute(cql, values);
+        String versionCondition = seenVersion == null ? "IF version = null" : "IF version = ?";
+        String cql = "UPDATE members SET " + assignments + ", version = ? WHERE member_id = ? " + versionCondition;
+        List<Object> values = new ArrayList<>(Arrays.asList(assignedValues));  // Email and phone may be null
+        values.add((seenVersion == null ? 0 : seenVersion) + 1);
+        values.add(memberId);
+        if (seenVersion != null) {
+            values.add(seenVersion);
+        }
+        return cassandra.getCqlOperations().execute(cql, values.toArray());
     }
 }

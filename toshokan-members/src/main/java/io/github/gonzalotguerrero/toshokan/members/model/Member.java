@@ -5,6 +5,7 @@ import org.springframework.data.cassandra.core.mapping.PrimaryKey;
 import org.springframework.data.cassandra.core.mapping.Table;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -26,13 +27,16 @@ public record Member(
         // When the member signed up with the library
         @Column("joined_at") Instant joinedAt,
         // Goes up by one with every change. Members saved before versions existed have none, which counts as 0
-        @Column("version") Long version
+        @Column("version") Long version,
+        // Lends in progress, by loan id, with the time each was reserved. See MemberLendingState
+        @Column("loan_slots") Map<UUID, Instant> loanSlots
 ) {
 
     /** A brand new member, at version 1. */
     public static Member newMember(UUID memberId, String cardNumber, String fullName, String email, String phone,
                                    Instant joinedAt) {
-        return new Member(memberId, cardNumber, fullName, email, phone, MemberStatus.ACTIVE, joinedAt, 1L);
+        return new Member(memberId, cardNumber, fullName, email, phone, MemberStatus.ACTIVE, joinedAt, 1L,
+                null);
     }
 
     /** The version the next change will have. */
@@ -41,10 +45,12 @@ public record Member(
     }
 
     public Member withContactDetails(String newFullName, String newEmail, String newPhone) {
-        return new Member(memberId, cardNumber, newFullName, newEmail, newPhone, status, joinedAt, version);
+        return new Member(memberId, cardNumber, newFullName, newEmail, newPhone, status, joinedAt, version,
+                loanSlots);
     }
 
     public Member withStatus(MemberStatus newStatus) {
-        return new Member(memberId, cardNumber, fullName, email, phone, newStatus, joinedAt, version);
+        return new Member(memberId, cardNumber, fullName, email, phone, newStatus, joinedAt, version,
+                loanSlots);
     }
 }

@@ -9,6 +9,7 @@ import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopyStatus;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyByInventoryNumberRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyRepository;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookCopyStatusChanges;
+import io.github.gonzalotguerrero.toshokan.inventory.repository.BookLockLease;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.BookLocks;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.InventoryNumberClaims;
 import io.github.gonzalotguerrero.toshokan.inventory.repository.NewBookCopyInserter;
@@ -68,16 +69,23 @@ public class BookCopyService {
      * while the copy is being added.
      */
     public BookCopyDetails addBookCopy(UUID bookId, AddBookCopyRequest request) {
-        return locks.whileLocked(bookId, () -> insertCopy(bookId, request));
+        return locks.whileLocked(bookId, lease -> insertCopy(bookId, request, lease));
     }
 
-    private BookCopyDetails insertCopy(UUID bookId, AddBookCopyRequest request) {
+    private BookCopyDetails insertCopy(UUID bookId, AddBookCopyRequest request, BookLockLease lease) {
         BookDetails book = requireBook(bookId);
         String inventoryNumber = request.inventoryNumber().strip();
         BookCopy copy = BookCopy.newCopy(bookId, UUID.randomUUID(), inventoryNumber, now());
 
         if (!claimInventoryNumber(inventoryNumber, bookId, copy.bookCopyId())) {
             throw new ConflictException("Inventory number " + inventoryNumber + " is already in use");
+        }
+        try {
+            lease.ensureStillHeld();
+        } catch (ConflictException e) {
+            // Nothing but the claim was written, so the number can go back
+            inventoryNumbers.release(inventoryNumber, bookId, copy.bookCopyId());
+            throw e;
         }
         boolean inserted;
         try {
@@ -122,7 +130,11 @@ public class BookCopyService {
         BookDetails book = requireBook(bookId);
         BookCopy copy = requireCopy(bookId, bookCopyId);
         if (copy.status() == BookCopyStatus.WITHDRAWN && newStatus != BookCopyStatus.WITHDRAWN) {
-            return locks.whileLocked(bookId, () -> details(applyStatus(requireBook(bookId), copy, newStatus)));
+            return locks.whileLocked(bookId, lease -> {
+                BookDetails current = requireBook(bookId);
+                lease.ensureStillHeld();
+                return details(applyStatus(current, copy, newStatus));
+            });
         }
         return details(applyStatus(book, copy, newStatus));
     }

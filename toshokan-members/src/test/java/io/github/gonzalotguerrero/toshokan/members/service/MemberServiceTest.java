@@ -2,6 +2,7 @@ package io.github.gonzalotguerrero.toshokan.members.service;
 
 import io.github.gonzalotguerrero.toshokan.members.dto.CreateMemberRequest;
 import io.github.gonzalotguerrero.toshokan.members.dto.MemberDetails;
+import io.github.gonzalotguerrero.toshokan.members.dto.MemberLendingState;
 import io.github.gonzalotguerrero.toshokan.members.dto.UpdateMemberRequest;
 import io.github.gonzalotguerrero.toshokan.members.model.Member;
 import io.github.gonzalotguerrero.toshokan.members.model.MemberByCardNumber;
@@ -31,6 +32,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -39,7 +41,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
@@ -53,7 +54,7 @@ class MemberServiceTest {
     private static final Instant NOW = Instant.parse("2026-06-15T12:00:00Z");
 
     private static final Member ANA = new Member(UUID.randomUUID(), "CARD-0001", "Ana Pérez", "ana@example.com",
-            null, MemberStatus.ACTIVE, Instant.parse("2026-01-10T09:00:00Z"), 3L);
+            null, MemberStatus.ACTIVE, Instant.parse("2026-01-10T09:00:00Z"), 3L, null);
 
     @Mock
     private MemberRepository members;
@@ -249,7 +250,7 @@ class MemberServiceTest {
     void theListOnlyShowsEntriesThatMatchTheMemberAsTheyAreNow() {
         Member renamed = ANA.withContactDetails("Ana Gómez", ANA.email(), null);
         Member bruno = new Member(UUID.randomUUID(), "CARD-0002", "Bruno Díaz", null, "555-0000",
-                MemberStatus.ACTIVE, NOW, 1L);
+                MemberStatus.ACTIVE, NOW, 1L, null);
         UUID neverSaved = UUID.randomUUID();
         when(directory.findByDirectoryPartition(eq(MemberDirectoryEntry.DIRECTORY_PARTITION), any()))
                 .thenReturn(new SliceImpl<>(List.of(
@@ -361,7 +362,6 @@ class MemberServiceTest {
     void deactivatingMarksTheMemberAsInactive() {
         when(members.findById(ANA.memberId())).thenReturn(Optional.of(ANA));
         when(writer.update(any(), any())).thenReturn(true);
-        guardAllowsDeactivation();
 
         service.deactivateMember(ANA.memberId());
 
@@ -372,7 +372,6 @@ class MemberServiceTest {
     void aDeactivationThatLostTheRaceIsAConflict() {
         when(members.findById(ANA.memberId())).thenReturn(Optional.of(ANA));
         when(writer.update(any(), any())).thenReturn(false);
-        guardAllowsDeactivation();
 
         assertThatThrownBy(() -> service.deactivateMember(ANA.memberId())).isInstanceOf(ConflictException.class);
     }
@@ -381,7 +380,7 @@ class MemberServiceTest {
     void doesNotDeactivateAMemberTheGuardRefuses() {
         when(members.findById(ANA.memberId())).thenReturn(Optional.of(ANA));
         doThrow(new ConflictException("Member still has 1 book out"))
-                .when(deactivationGuard).runGuarded(eq(ANA.memberId()), any());
+                .when(deactivationGuard).checkCanDeactivate(MemberLendingState.from(ANA));
 
         assertThatThrownBy(() -> service.deactivateMember(ANA.memberId())).isInstanceOf(ConflictException.class);
         verifyNoInteractions(writer);
@@ -391,12 +390,12 @@ class MemberServiceTest {
     void settingTheStatusToInactiveGoesThroughTheGuardToo() {
         when(members.findById(ANA.memberId())).thenReturn(Optional.of(ANA));
         when(writer.update(any(), any())).thenReturn(true);
-        guardAllowsDeactivation();
 
         service.updateMember(ANA.memberId(), new UpdateMemberRequest(null, null, null, MemberStatus.INACTIVE));
 
-        verify(deactivationGuard).runGuarded(eq(ANA.memberId()), any());
-        verify(writer).update(ANA, ANA.withStatus(MemberStatus.INACTIVE));
+        InOrder order = inOrder(deactivationGuard, writer);
+        order.verify(deactivationGuard).checkCanDeactivate(MemberLendingState.from(ANA));
+        order.verify(writer).update(ANA, ANA.withStatus(MemberStatus.INACTIVE));
     }
 
     @Test
@@ -426,11 +425,34 @@ class MemberServiceTest {
         assertThatThrownBy(() -> service.deactivateMember(memberId)).isInstanceOf(NotFoundException.class);
     }
 
-    /** Makes the guard behave like it does when the member has no books out: it just runs the deactivation. */
-    private void guardAllowsDeactivation() {
-        doAnswer(call -> {
-            call.<Runnable>getArgument(1).run();
-            return null;
-        }).when(deactivationGuard).runGuarded(eq(ANA.memberId()), any());
+    @Test
+    void reservingASlotKeepsTheGivenSlotsAddsTheNewOneAndChecksTheVersion() {
+        UUID kept = UUID.randomUUID();
+        UUID loanId = UUID.randomUUID();
+        Instant keptAt = NOW.minusSeconds(30);
+        when(writer.replaceLoanSlots(eq(ANA.memberId()), eq(3L), any())).thenReturn(true);
+
+        boolean reserved = service.reserveLoanSlot(MemberLendingState.from(ANA), Map.of(kept, keptAt), loanId, NOW);
+
+        assertThat(reserved).isTrue();
+        verify(writer).replaceLoanSlots(ANA.memberId(), 3L, Map.of(kept, keptAt, loanId, NOW));
+    }
+
+    @Test
+    void reservingASlotFailsIfTheMemberChangedSinceTheyWereRead() {
+        when(writer.replaceLoanSlots(eq(ANA.memberId()), eq(3L), any())).thenReturn(false);
+
+        assertThat(service.reserveLoanSlot(MemberLendingState.from(ANA), Map.of(), UUID.randomUUID(), NOW)).isFalse();
+    }
+
+    @Test
+    void theLendingStateShowsNoSlotsForAMemberWhoNeverHadAny() {
+        when(members.findById(ANA.memberId())).thenReturn(Optional.of(ANA));
+
+        MemberLendingState state = service.lendingState(ANA.memberId());
+
+        assertThat(state.loanSlots()).isEmpty();
+        assertThat(state.version()).isEqualTo(3L);
+        assertThat(state.status()).isEqualTo(MemberStatus.ACTIVE);
     }
 }

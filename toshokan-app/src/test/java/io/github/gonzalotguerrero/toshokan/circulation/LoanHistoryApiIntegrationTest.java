@@ -8,7 +8,6 @@ import io.github.gonzalotguerrero.toshokan.circulation.dto.LoanHistoryEntry;
 import io.github.gonzalotguerrero.toshokan.circulation.dto.OverdueLoan;
 import io.github.gonzalotguerrero.toshokan.circulation.model.LoanByCopy;
 import io.github.gonzalotguerrero.toshokan.circulation.model.LoanByMember;
-import io.github.gonzalotguerrero.toshokan.circulation.model.MemberLendingLock;
 import io.github.gonzalotguerrero.toshokan.circulation.repository.LoanHistoryWriter;
 import io.github.gonzalotguerrero.toshokan.inventory.dto.BookCopyDetails;
 import io.github.gonzalotguerrero.toshokan.inventory.model.BookCopy;
@@ -66,7 +65,7 @@ class LoanHistoryApiIntegrationTest {
     @BeforeEach
     void setUp() {
         for (Class<?> table : List.of(Book.class, BookCopy.class, BookCopyByInventoryNumber.class, BookHoldings.class,
-                Member.class, MemberByCardNumber.class, MemberDirectoryEntry.class, MemberLendingLock.class,
+                Member.class, MemberByCardNumber.class, MemberDirectoryEntry.class,
                 LoanByCopy.class, LoanByMember.class)) {
             cassandra.truncate(table);
         }
