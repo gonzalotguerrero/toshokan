@@ -265,7 +265,7 @@ class LendingServiceTest {
 
         assertThatThrownBy(() -> service.lend(new LendRequest("LIB-000001", "CARD-0001")))
                 .isInstanceOf(ConflictException.class);
-        verify(members).releaseLoanSlot(ANA.memberId(), loanId.getValue());
+        verify(members).releaseLoanSlot(ANA_STATE, loanId.getValue());
     }
 
     @Test
@@ -279,7 +279,7 @@ class LendingServiceTest {
 
         assertThatThrownBy(() -> service.lend(new LendRequest("LIB-000001", "CARD-0001")))
                 .isInstanceOf(CassandraInsufficientReplicasAvailableException.class);
-        verify(members).releaseLoanSlot(eq(ANA.memberId()), any());
+        verify(members).releaseLoanSlot(eq(ANA_STATE), any());
     }
 
     @Test
@@ -306,7 +306,7 @@ class LendingServiceTest {
 
         assertThatThrownBy(() -> service.lend(new LendRequest("LIB-000001", "CARD-0001")))
                 .isInstanceOf(CassandraWriteTimeoutException.class);
-        verify(members).releaseLoanSlot(eq(ANA.memberId()), any());
+        verify(members).releaseLoanSlot(eq(ANA_STATE), any());
         verify(copies, never()).markLent(any(), any(), any(), any(), any(), any());
     }
 
@@ -318,7 +318,7 @@ class LendingServiceTest {
         givenTheSlotIsReserved();
         when(copies.markLent(any(), any(), any(), any(), any(), any()))
                 .thenThrow(new ConflictException("Book copy LIB-000001 can't be lent because it's LENT"));
-        doThrow(new IllegalStateException("Cassandra is down")).when(members).releaseLoanSlot(any(), any());
+        when(members.releaseLoanSlot(any(), any())).thenThrow(new IllegalStateException("Cassandra is down"));
 
         assertThatThrownBy(() -> service.lend(new LendRequest("LIB-000001", "CARD-0001")))
                 .isInstanceOf(ConflictException.class)

@@ -446,6 +446,14 @@ class MemberServiceTest {
     }
 
     @Test
+    void releasingASlotExpectsTheVersionTheReservationWrote() {
+        UUID loanId = UUID.randomUUID();
+        when(writer.removeLoanSlot(ANA.memberId(), 4L, loanId)).thenReturn(true);
+
+        assertThat(service.releaseLoanSlot(MemberLendingState.from(ANA), loanId)).isTrue();
+    }
+
+    @Test
     void theLendingStateShowsNoSlotsForAMemberWhoNeverHadAny() {
         when(members.findById(ANA.memberId())).thenReturn(Optional.of(ANA));
 

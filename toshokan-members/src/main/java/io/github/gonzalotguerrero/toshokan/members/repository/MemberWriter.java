@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -61,12 +62,12 @@ public class MemberWriter {
     }
 
     /**
-     * Removes one loan slot. It's conditional on the member existing only because every write here has to be
-     * conditional; it doesn't need the version, since dropping a slot can only ever let fewer lends through.
+     * Removes one loan slot, as long as the member is still at {@code seenVersion}, and moves the version on.
+     * Moving it on matters: a lend that read the member before this would otherwise write the whole slot list back,
+     * slot included. Returns {@code false} if the member had changed, in which case nothing was written.
      */
-    public void removeLoanSlot(UUID memberId, UUID loanId) {
-        cassandra.getCqlOperations().execute("DELETE loan_slots[?] FROM members WHERE member_id = ? IF EXISTS",
-                loanId, memberId);
+    public boolean removeLoanSlot(UUID memberId, long seenVersion, UUID loanId) {
+        return updateIfVersion(memberId, seenVersion, "loan_slots = loan_slots - ?", Set.of(loanId));
     }
 
     /** Runs {@code UPDATE members SET <assignments>, version = <next> WHERE member_id = ? IF version = <seen>}. */

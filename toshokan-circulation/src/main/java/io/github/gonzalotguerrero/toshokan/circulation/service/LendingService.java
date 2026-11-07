@@ -119,7 +119,7 @@ public class LendingService {
                     member.memberId(), dueDate, 0, null));
         } catch (RuntimeException e) {
             // The copy hasn't been touched, so the lend can't have happened whatever became of this write
-            releaseSlot(member.memberId(), loanId);
+            releaseSlot(state, loanId);
             throw e;
         }
         try {
@@ -127,13 +127,13 @@ public class LendingService {
                     lentAt, dueDate));
         } catch (ConflictException | NotFoundException e) {
             // Refused before anything was written to the copy
-            releaseSlot(member.memberId(), loanId);
+            releaseSlot(state, loanId);
             throw e;
         } catch (RuntimeException e) {
             // After a timeout the copy may still end up lent, so the slot has to stay. If the lend never lands,
             // the slot stops counting once it's older than LoanSlots.PENDING_FOR
             if (WriteOutcomes.definitelyNotApplied(e)) {
-                releaseSlot(member.memberId(), loanId);
+                releaseSlot(state, loanId);
             }
             throw e;
         }
@@ -210,12 +210,15 @@ public class LendingService {
         return copies.findCopiesLentTo(memberId).stream().filter(copy -> copy.loan() != null).toList();
     }
 
-    private void releaseSlot(UUID memberId, UUID loanId) {
+    private void releaseSlot(MemberLendingState reservedFrom, UUID loanId) {
         try {
-            members.releaseLoanSlot(memberId, loanId);
+            if (!members.releaseLoanSlot(reservedFrom, loanId)) {
+                log.info("Loan slot {} of member {} wasn't released because the member changed meanwhile. It stops"
+                        + " counting on its own once it's old enough", loanId, reservedFrom.memberId());
+            }
         } catch (RuntimeException e) {
             // The lend has failed already. The slot stops counting on its own once it's old enough
-            log.warn("Couldn't release loan slot {} of member {}", loanId, memberId, e);
+            log.warn("Couldn't release loan slot {} of member {}", loanId, reservedFrom.memberId(), e);
         }
     }
 

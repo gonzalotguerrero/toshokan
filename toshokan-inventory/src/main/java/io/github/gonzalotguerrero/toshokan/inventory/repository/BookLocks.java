@@ -10,9 +10,7 @@ import org.springframework.data.cassandra.core.InsertOptions;
 import org.springframework.data.cassandra.core.query.Criteria;
 import org.springframework.stereotype.Component;
 
-import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -38,11 +36,9 @@ public class BookLocks {
     private static final Duration SAFE_FOR = LOCK_TTL.dividedBy(2);
 
     private final CassandraOperations cassandra;
-    private final Clock clock;
 
-    public BookLocks(CassandraOperations cassandra, Clock clock) {
+    public BookLocks(CassandraOperations cassandra) {
         this.cassandra = cassandra;
-        this.clock = clock;
     }
 
     /**
@@ -53,13 +49,13 @@ public class BookLocks {
     public <T> T whileLocked(UUID bookId, Function<BookLockLease, T> work) {
         UUID lockId = UUID.randomUUID();
         // Taken before the insert, so the lease can only be shorter than the lock, never longer
-        Instant takenAt = clock.instant();
+        long takenAt = System.nanoTime();
         if (!cassandra.insert(new BookLock(bookId, lockId), TAKE_LOCK).wasApplied()) {
             throw new ConflictException("Something else is being done to book " + bookId
                     + " right now. Try again in a moment");
         }
         try {
-            return work.apply(new BookLockLease(bookId, takenAt.plus(SAFE_FOR), clock));
+            return work.apply(new BookLockLease(bookId, takenAt + SAFE_FOR.toNanos(), System::nanoTime));
         } finally {
             release(bookId, lockId);
         }

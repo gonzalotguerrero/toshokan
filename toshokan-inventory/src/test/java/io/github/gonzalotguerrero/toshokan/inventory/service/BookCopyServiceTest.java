@@ -564,8 +564,8 @@ class BookCopyServiceTest {
     }
 
     private static Object runWithLease(Function<BookLockLease, ?> work, boolean stillSafe) {
-        Instant safeUntil = stillSafe ? CLOCK.instant().plusSeconds(5) : CLOCK.instant().minusSeconds(1);
-        return work.apply(new BookLockLease(DUNE.bookId(), safeUntil, CLOCK));
+        // The monotonic clock always reads 0 here, so the lease is safe until a moment after it or before it
+        return work.apply(new BookLockLease(DUNE.bookId(), stillSafe ? 5 : -1, () -> 0));
     }
 
     private void givenExistingCopy(BookCopy copy) {

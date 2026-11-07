@@ -232,9 +232,16 @@ public class MemberService {
         return writer.replaceLoanSlots(seen.memberId(), seen.version(), slots);
     }
 
-    /** Gives a slot back after a lend that certainly didn't happen, so it doesn't count against the member. */
-    public void releaseLoanSlot(UUID memberId, UUID loanId) {
-        writer.removeLoanSlot(memberId, loanId);
+    /**
+     * Gives back a slot that {@link #reserveLoanSlot} reserved for a lend that certainly didn't happen. It only works
+     * if nothing else has changed the member since the reservation. If something did, the slot stays and stops
+     * counting once it's old enough, which can only make the member's limit stricter for a while, never looser.
+     * Returns whether the slot was given back.
+     */
+    public boolean releaseLoanSlot(MemberLendingState seen, UUID loanId) {
+        // The reservation moved the member to the version after the one seen
+        long reservedVersion = (seen.version() == null ? 0 : seen.version()) + 1;
+        return writer.removeLoanSlot(seen.memberId(), reservedVersion, loanId);
     }
 
     /**

@@ -13,9 +13,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -33,8 +31,6 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class CopyCheckingDeletionGuardTest {
-
-    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-06-15T12:00:00Z"), ZoneOffset.UTC);
 
     private static final BookDetails DUNE = new BookDetails(UUID.randomUUID(), null, "Dune",
             List.of("Frank Herbert"), null, 1965, "English", Set.of("Science fiction"), Instant.now());
@@ -55,7 +51,7 @@ class CopyCheckingDeletionGuardTest {
 
     @Test
     void letsABookWithoutCopiesBeDeleted() {
-        givenTheLockIsHeldFor(Instant.parse("2026-06-15T12:00:05Z"));
+        givenTheLockIsStillSafe(true);
         when(copies.findByBookId(DUNE.bookId())).thenReturn(List.of());
 
         guard.runGuarded(DUNE, () -> deleted.set(true));
@@ -66,7 +62,7 @@ class CopyCheckingDeletionGuardTest {
 
     @Test
     void letsABookWhoseCopiesAreAllWithdrawnBeDeleted() {
-        givenTheLockIsHeldFor(Instant.parse("2026-06-15T12:00:05Z"));
+        givenTheLockIsStillSafe(true);
         when(copies.findByBookId(DUNE.bookId())).thenReturn(List.of(
                 copy(BookCopyStatus.WITHDRAWN), copy(BookCopyStatus.WITHDRAWN)));
 
@@ -77,7 +73,7 @@ class CopyCheckingDeletionGuardTest {
 
     @Test
     void refusesWhileAnyCopyIsNotWithdrawn() {
-        givenTheLockIsHeldFor(Instant.parse("2026-06-15T12:00:05Z"));
+        givenTheLockIsStillSafe(true);
         when(copies.findByBookId(DUNE.bookId())).thenReturn(List.of(
                 copy(BookCopyStatus.WITHDRAWN), copy(BookCopyStatus.DAMAGED), copy(BookCopyStatus.LENT)));
 
@@ -91,7 +87,7 @@ class CopyCheckingDeletionGuardTest {
 
     @Test
     void deletesNothingIfTheLockWasHeldTooLong() {
-        givenTheLockIsHeldFor(Instant.parse("2026-06-15T11:59:59Z"));
+        givenTheLockIsStillSafe(false);
         when(copies.findByBookId(DUNE.bookId())).thenReturn(List.of());
 
         assertThatThrownBy(() -> guard.runGuarded(DUNE, () -> deleted.set(true)))
@@ -102,7 +98,7 @@ class CopyCheckingDeletionGuardTest {
 
     @Test
     void theDeletionStandsEvenIfTheHoldingsCannotBeUpdated() {
-        givenTheLockIsHeldFor(Instant.parse("2026-06-15T12:00:05Z"));
+        givenTheLockIsStillSafe(true);
         when(copies.findByBookId(DUNE.bookId())).thenReturn(List.of());
         doThrow(new IllegalStateException("Cassandra is down")).when(holdingsRefresher).refresh(DUNE);
 
@@ -111,10 +107,11 @@ class CopyCheckingDeletionGuardTest {
         assertThat(deleted).isTrue();
     }
 
-    /** Runs the work with a lease that's safe until {@code safeUntil}. The clock is fixed at noon. */
-    private void givenTheLockIsHeldFor(Instant safeUntil) {
+    /** Runs the work with a lease that's either still safe, or held for too long already. */
+    private void givenTheLockIsStillSafe(boolean stillSafe) {
+        BookLockLease lease = new BookLockLease(DUNE.bookId(), stillSafe ? 5 : -1, () -> 0);
         when(locks.whileLocked(eq(DUNE.bookId()), any())).thenAnswer(call ->
-                call.<Function<BookLockLease, ?>>getArgument(1).apply(new BookLockLease(DUNE.bookId(), safeUntil, CLOCK)));
+                call.<Function<BookLockLease, ?>>getArgument(1).apply(lease));
     }
 
     private static BookCopy copy(BookCopyStatus status) {

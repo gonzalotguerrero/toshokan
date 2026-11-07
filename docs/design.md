@@ -84,8 +84,9 @@ Rows left out this way are why a history page can have fewer items than asked fo
 
 A slot is pending unless a copy shows its loan (it already counts through the copy), the history says the loan was
 returned, or it's more than 10 minutes old (a lend whose copy write hasn't landed by then never will). If the lend
-certainly failed, its slot is removed straight away. After a timeout it's kept, because the copy may still end up
-lent, and it stops counting once it's 10 minutes old. Returns and renewals don't touch the member at all.
+certainly failed, its slot is removed straight away, with `IF version = ?` for the version the reservation wrote
+(so a lend that read the member in between can't write the slot back). If the member changed meanwhile, or after a
+timeout, when the copy may still end up lent, the slot is kept and stops counting once it's 10 minutes old. Returns and renewals don't touch the member at all.
 
 Any change to a member also changes the version, so a lend that overlaps with, say, an email change gets a 409 and
 has to be retried.
@@ -95,7 +96,8 @@ has to be retried.
 The lock is an `IF NOT EXISTS` row with a 10-second TTL, so a lock that never gets released clears itself. The
 TTL also means a request that stalls (a long GC pause, a slow Cassandra) can lose the lock without knowing it. To
 make that unlikely, the write that decides the outcome only starts if less than 5 seconds have passed since the
-lock was taken; otherwise the request gets a 409 and nothing is saved. This narrows the gap but doesn't close it:
+lock was taken, measured with a monotonic clock so a change to the server's time can't fool it; otherwise the
+request gets a 409 and nothing is saved. This narrows the gap but doesn't close it:
 a pause between that check and the write could still let a second request in. Deletes are rare and done by staff,
 so this was judged good enough.
 
